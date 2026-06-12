@@ -572,6 +572,12 @@ int shadow_server_parse_command_line(rdpShadowServer* server, int argc, char** a
 			if (!freerdp_settings_set_bool(settings, FreeRDP_RemoteFxCodec, arg->Value != nullptr))
 				return fail_at(arg, COMMAND_LINE_ERROR);
 		}
+		CommandLineSwitchCase(arg, "gfx-clearcodec")
+		{
+			if (!freerdp_settings_set_bool(settings, FreeRDP_GfxClearCodec,
+			                               arg->Value != nullptr))
+				return fail_at(arg, COMMAND_LINE_ERROR);
+		}
 		CommandLineSwitchCase(arg, "gfx-planar")
 		{
 			if (!freerdp_settings_set_bool(settings, FreeRDP_GfxPlanar, arg->Value != nullptr))

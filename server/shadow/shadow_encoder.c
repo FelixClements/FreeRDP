@@ -194,6 +194,26 @@ fail:
 }
 
 WINPR_ATTR_NODISCARD
+static int shadow_encoder_init_clear(rdpShadowEncoder* encoder)
+{
+	if (!encoder->clear)
+		encoder->clear = clear_context_new(TRUE);
+
+	if (!encoder->clear)
+		goto fail;
+
+	if (!clear_context_reset(encoder->clear))
+		goto fail;
+
+	encoder->codecs |= FREERDP_CODEC_CLEARCODEC;
+	return 1;
+fail:
+	clear_context_free(encoder->clear);
+	encoder->clear = nullptr;
+	return -1;
+}
+
+WINPR_ATTR_NODISCARD
 static int shadow_encoder_init_planar(rdpShadowEncoder* encoder)
 {
 	DWORD planarFlags = 0;
@@ -377,6 +397,18 @@ static int shadow_encoder_uninit_nsc(rdpShadowEncoder* encoder)
 	return 1;
 }
 
+static int shadow_encoder_uninit_clear(rdpShadowEncoder* encoder)
+{
+	if (encoder->clear)
+	{
+		clear_context_free(encoder->clear);
+		encoder->clear = nullptr;
+	}
+
+	encoder->codecs &= (UINT32)~FREERDP_CODEC_CLEARCODEC;
+	return 1;
+}
+
 static int shadow_encoder_uninit_planar(rdpShadowEncoder* encoder)
 {
 	if (encoder->planar)
@@ -453,6 +485,8 @@ static int shadow_encoder_uninit(rdpShadowEncoder* encoder)
 
 	shadow_encoder_uninit_nsc(encoder);
 
+	shadow_encoder_uninit_clear(encoder);
+
 	shadow_encoder_uninit_planar(encoder);
 
 	shadow_encoder_uninit_interleaved(encoder);
@@ -512,6 +546,15 @@ int shadow_encoder_prepare(rdpShadowEncoder* encoder, UINT32 codecs)
 	{
 		WLog_DBG(TAG, "initializing NSCodec encoder");
 		status = shadow_encoder_init_nsc(encoder);
+
+		if (status < 0)
+			return -1;
+	}
+
+	if ((codecs & FREERDP_CODEC_CLEARCODEC) && !(encoder->codecs & FREERDP_CODEC_CLEARCODEC))
+	{
+		WLog_DBG(TAG, "initializing ClearCodec encoder");
+		status = shadow_encoder_init_clear(encoder);
 
 		if (status < 0)
 			return -1;

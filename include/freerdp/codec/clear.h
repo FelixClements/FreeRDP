@@ -47,6 +47,36 @@ extern "C"
 	                         BYTE** WINPR_RESTRICT ppDstData, UINT32* WINPR_RESTRICT pDstSize));
 #endif
 
+	/** @brief encode an image rectangle to ClearCodec data.
+	 *
+	 *  This encoder currently emits either residual data or a full-rectangle raw BGR24 subcodec
+	 *  stream, choosing the smaller representation. The caller owns `*ppDstData` on success and
+	 *  must release it with `free()`. `*ppDstData` is set to nullptr and `*pDstSize` to 0 before
+	 *  validation.
+	 *
+	 *  @param clear The context to use for compression, must not be \b nullptr, must have been
+	 * created with \ref Compressor = TRUE
+	 *  @param pSrcData A pointer to the source image data, must not be \b nullptr
+	 *  @param SrcFormat The bitmap format of the source buffer
+	 *  @param SrcStep The size in bytes of a source image line. Must fit `SrcX + nWidth` pixels.
+	 *  @param SrcX The x offset in pixels in the source buffer
+	 *  @param SrcY The y offset in lines in the source buffer
+	 *  @param nWidth The width in pixels of the encoded rectangle, range 1..65535
+	 *  @param nHeight The height in lines of the encoded rectangle, range 1..65535
+	 *  @param ppDstData Receives a newly allocated output buffer on success
+	 *  @param pDstSize Receives the size in bytes of `*ppDstData` on success
+	 *  @param palette An optional color palette to use if the source format is 8 bit
+	 *
+	 *  @return \b 0 in case of success, a negative error code otherwise.
+	 */
+	WINPR_ATTR_NODISCARD
+	FREERDP_API INT32 clear_encode(CLEAR_CONTEXT* WINPR_RESTRICT clear,
+	                               const BYTE* WINPR_RESTRICT pSrcData, UINT32 SrcFormat,
+	                               UINT32 SrcStep, UINT32 SrcX, UINT32 SrcY, UINT32 nWidth,
+	                               UINT32 nHeight, BYTE** WINPR_RESTRICT ppDstData,
+	                               UINT32* WINPR_RESTRICT pDstSize,
+	                               const gdiPalette* WINPR_RESTRICT palette);
+
 	/** @brief decompress clear codec data
 	 *
 	 *  @param clear The context to use for decompression, must not be \b nullptr, must have been
@@ -74,6 +104,21 @@ extern "C"
 	                                   UINT32 DstFormat, UINT32 nDstStep, UINT32 nXDst,
 	                                   UINT32 nYDst, UINT32 nDstWidth, UINT32 nDstHeight,
 	                                   const gdiPalette* WINPR_RESTRICT palette);
+
+	/** @brief configure optional lossy NSCodec use for ClearCodec encoding.
+	 *
+	 *  ClearCodec encoding is pixel-exact by default and will not select NSCodec unless the decoded
+	 *  NSCodec candidate matches the source exactly. Set \b tolerance to a nonzero per-channel
+	 *  absolute difference to explicitly allow bounded lossy NSCodec candidates.
+	 *
+	 *  @param clear The context to configure, must be a compressor context.
+	 *  @param tolerance Maximum allowed per-channel absolute difference. Use \b 0 for exact-only.
+	 *
+	 *  @return \b TRUE on success, \b FALSE otherwise.
+	 */
+	WINPR_ATTR_NODISCARD
+	FREERDP_API BOOL clear_context_set_encoder_nsc_tolerance(CLEAR_CONTEXT* WINPR_RESTRICT clear,
+	                                                         UINT32 tolerance);
 
 	/** @brief reset the clear codec state.
 	 *

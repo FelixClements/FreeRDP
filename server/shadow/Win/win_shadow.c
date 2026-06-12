@@ -38,6 +38,14 @@
 #define MOUSEEVENTF_HWHEEL 0x1000
 #endif
 
+#ifdef NONAMELESSUNION
+#define WIN_SHADOW_INPUT_KEYBOARD(input) ((input).DUMMYUNIONNAME.ki)
+#define WIN_SHADOW_INPUT_MOUSE(input) ((input).DUMMYUNIONNAME.mi)
+#else
+#define WIN_SHADOW_INPUT_KEYBOARD(input) ((input).ki)
+#define WIN_SHADOW_INPUT_MOUSE(input) ((input).mi)
+#endif
+
 static BOOL win_shadow_input_synchronize_event(rdpShadowSubsystem* subsystem,
                                                rdpShadowClient* client, UINT32 flags)
 {
@@ -51,17 +59,17 @@ static BOOL win_shadow_input_keyboard_event(rdpShadowSubsystem* subsystem, rdpSh
 	UINT rc;
 	INPUT event;
 	event.type = INPUT_KEYBOARD;
-	event.ki.wVk = 0;
-	event.ki.wScan = code;
-	event.ki.dwFlags = KEYEVENTF_SCANCODE;
-	event.ki.dwExtraInfo = 0;
-	event.ki.time = 0;
+	WIN_SHADOW_INPUT_KEYBOARD(event).wVk = 0;
+	WIN_SHADOW_INPUT_KEYBOARD(event).wScan = code;
+	WIN_SHADOW_INPUT_KEYBOARD(event).dwFlags = KEYEVENTF_SCANCODE;
+	WIN_SHADOW_INPUT_KEYBOARD(event).dwExtraInfo = 0;
+	WIN_SHADOW_INPUT_KEYBOARD(event).time = 0;
 
 	if (flags & KBD_FLAGS_RELEASE)
-		event.ki.dwFlags |= KEYEVENTF_KEYUP;
+		WIN_SHADOW_INPUT_KEYBOARD(event).dwFlags |= KEYEVENTF_KEYUP;
 
 	if (flags & KBD_FLAGS_EXTENDED)
-		event.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+		WIN_SHADOW_INPUT_KEYBOARD(event).dwFlags |= KEYEVENTF_EXTENDEDKEY;
 
 	rc = SendInput(1, &event, sizeof(INPUT));
 	if (rc == 0)
@@ -76,14 +84,14 @@ static BOOL win_shadow_input_unicode_keyboard_event(rdpShadowSubsystem* subsyste
 	UINT rc;
 	INPUT event;
 	event.type = INPUT_KEYBOARD;
-	event.ki.wVk = 0;
-	event.ki.wScan = code;
-	event.ki.dwFlags = KEYEVENTF_UNICODE;
-	event.ki.dwExtraInfo = 0;
-	event.ki.time = 0;
+	WIN_SHADOW_INPUT_KEYBOARD(event).wVk = 0;
+	WIN_SHADOW_INPUT_KEYBOARD(event).wScan = code;
+	WIN_SHADOW_INPUT_KEYBOARD(event).dwFlags = KEYEVENTF_UNICODE;
+	WIN_SHADOW_INPUT_KEYBOARD(event).dwExtraInfo = 0;
+	WIN_SHADOW_INPUT_KEYBOARD(event).time = 0;
 
 	if (flags & KBD_FLAGS_RELEASE)
-		event.ki.dwFlags |= KEYEVENTF_KEYUP;
+		WIN_SHADOW_INPUT_KEYBOARD(event).dwFlags |= KEYEVENTF_KEYUP;
 
 	rc = SendInput(1, &event, sizeof(INPUT));
 	if (rc == 0)
@@ -104,13 +112,13 @@ static BOOL win_shadow_input_mouse_event(rdpShadowSubsystem* subsystem, rdpShado
 	if (flags & (PTR_FLAGS_WHEEL | PTR_FLAGS_HWHEEL))
 	{
 		if (flags & PTR_FLAGS_WHEEL)
-			event.mi.dwFlags = MOUSEEVENTF_WHEEL;
+			WIN_SHADOW_INPUT_MOUSE(event).dwFlags = MOUSEEVENTF_WHEEL;
 		else
-			event.mi.dwFlags = MOUSEEVENTF_HWHEEL;
-		event.mi.mouseData = flags & WheelRotationMask;
+			WIN_SHADOW_INPUT_MOUSE(event).dwFlags = MOUSEEVENTF_HWHEEL;
+		WIN_SHADOW_INPUT_MOUSE(event).mouseData = flags & WheelRotationMask;
 
 		if (flags & PTR_FLAGS_WHEEL_NEGATIVE)
-			event.mi.mouseData *= -1;
+			WIN_SHADOW_INPUT_MOUSE(event).mouseData *= -1;
 
 		rc = SendInput(1, &event, sizeof(INPUT));
 
@@ -127,44 +135,44 @@ static BOOL win_shadow_input_mouse_event(rdpShadowSubsystem* subsystem, rdpShado
 	{
 		width = (float)GetSystemMetrics(SM_CXSCREEN);
 		height = (float)GetSystemMetrics(SM_CYSCREEN);
-		event.mi.dx = (LONG)((float)x * (65535.0f / width));
-		event.mi.dy = (LONG)((float)y * (65535.0f / height));
-		event.mi.dwFlags = MOUSEEVENTF_ABSOLUTE;
+		WIN_SHADOW_INPUT_MOUSE(event).dx = (LONG)((float)x * (65535.0f / width));
+		WIN_SHADOW_INPUT_MOUSE(event).dy = (LONG)((float)y * (65535.0f / height));
+		WIN_SHADOW_INPUT_MOUSE(event).dwFlags = MOUSEEVENTF_ABSOLUTE;
 
 		if (flags & PTR_FLAGS_MOVE)
 		{
-			event.mi.dwFlags |= MOUSEEVENTF_MOVE;
+			WIN_SHADOW_INPUT_MOUSE(event).dwFlags |= MOUSEEVENTF_MOVE;
 			rc = SendInput(1, &event, sizeof(INPUT));
 			if (rc == 0)
 				return FALSE;
 		}
 
-		event.mi.dwFlags = MOUSEEVENTF_ABSOLUTE;
+		WIN_SHADOW_INPUT_MOUSE(event).dwFlags = MOUSEEVENTF_ABSOLUTE;
 
 		if (flags & PTR_FLAGS_BUTTON1)
 		{
 			if (flags & PTR_FLAGS_DOWN)
-				event.mi.dwFlags |= MOUSEEVENTF_LEFTDOWN;
+				WIN_SHADOW_INPUT_MOUSE(event).dwFlags |= MOUSEEVENTF_LEFTDOWN;
 			else
-				event.mi.dwFlags |= MOUSEEVENTF_LEFTUP;
+				WIN_SHADOW_INPUT_MOUSE(event).dwFlags |= MOUSEEVENTF_LEFTUP;
 
 			rc = SendInput(1, &event, sizeof(INPUT));
 		}
 		else if (flags & PTR_FLAGS_BUTTON2)
 		{
 			if (flags & PTR_FLAGS_DOWN)
-				event.mi.dwFlags |= MOUSEEVENTF_RIGHTDOWN;
+				WIN_SHADOW_INPUT_MOUSE(event).dwFlags |= MOUSEEVENTF_RIGHTDOWN;
 			else
-				event.mi.dwFlags |= MOUSEEVENTF_RIGHTUP;
+				WIN_SHADOW_INPUT_MOUSE(event).dwFlags |= MOUSEEVENTF_RIGHTUP;
 
 			rc = SendInput(1, &event, sizeof(INPUT));
 		}
 		else if (flags & PTR_FLAGS_BUTTON3)
 		{
 			if (flags & PTR_FLAGS_DOWN)
-				event.mi.dwFlags |= MOUSEEVENTF_MIDDLEDOWN;
+				WIN_SHADOW_INPUT_MOUSE(event).dwFlags |= MOUSEEVENTF_MIDDLEDOWN;
 			else
-				event.mi.dwFlags |= MOUSEEVENTF_MIDDLEUP;
+				WIN_SHADOW_INPUT_MOUSE(event).dwFlags |= MOUSEEVENTF_MIDDLEUP;
 
 			rc = SendInput(1, &event, sizeof(INPUT));
 		}
@@ -192,25 +200,25 @@ static BOOL win_shadow_input_extended_mouse_event(rdpShadowSubsystem* subsystem,
 		{
 			width = (float)GetSystemMetrics(SM_CXSCREEN);
 			height = (float)GetSystemMetrics(SM_CYSCREEN);
-			event.mi.dx = (LONG)((float)x * (65535.0f / width));
-			event.mi.dy = (LONG)((float)y * (65535.0f / height));
-			event.mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE;
+			WIN_SHADOW_INPUT_MOUSE(event).dx = (LONG)((float)x * (65535.0f / width));
+			WIN_SHADOW_INPUT_MOUSE(event).dy = (LONG)((float)y * (65535.0f / height));
+			WIN_SHADOW_INPUT_MOUSE(event).dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE;
 			rc = SendInput(1, &event, sizeof(INPUT));
 			if (rc == 0)
 				return FALSE;
 		}
 
-		event.mi.dx = event.mi.dy = event.mi.dwFlags = 0;
+		WIN_SHADOW_INPUT_MOUSE(event).dx = WIN_SHADOW_INPUT_MOUSE(event).dy = WIN_SHADOW_INPUT_MOUSE(event).dwFlags = 0;
 
 		if (flags & PTR_XFLAGS_DOWN)
-			event.mi.dwFlags |= MOUSEEVENTF_XDOWN;
+			WIN_SHADOW_INPUT_MOUSE(event).dwFlags |= MOUSEEVENTF_XDOWN;
 		else
-			event.mi.dwFlags |= MOUSEEVENTF_XUP;
+			WIN_SHADOW_INPUT_MOUSE(event).dwFlags |= MOUSEEVENTF_XUP;
 
 		if (flags & PTR_XFLAGS_BUTTON1)
-			event.mi.mouseData = XBUTTON1;
+			WIN_SHADOW_INPUT_MOUSE(event).mouseData = XBUTTON1;
 		else if (flags & PTR_XFLAGS_BUTTON2)
-			event.mi.mouseData = XBUTTON2;
+			WIN_SHADOW_INPUT_MOUSE(event).mouseData = XBUTTON2;
 
 		rc = SendInput(1, &event, sizeof(INPUT));
 	}

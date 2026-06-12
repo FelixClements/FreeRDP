@@ -74,7 +74,15 @@ set_target_properties(${MODULE_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${TEST
 
 foreach(test ${TESTS})
   get_filename_component(TestName ${test} NAME_WE)
-  add_test(${TestName} ${TESTING_OUTPUT_DIRECTORY}/${MODULE_NAME} ${TestName})
+  if(WIN32)
+    set(TEST_RUNTIME_PATH
+        "$<SHELL_PATH:$<TARGET_FILE_DIR:${MODULE_NAME}>>\\;$<SHELL_PATH:$<TARGET_FILE_DIR:freerdp>>\\;$<SHELL_PATH:$<TARGET_FILE_DIR:winpr>>\\;$ENV{PATH}"
+    )
+    add_test(NAME ${TestName} COMMAND ${CMAKE_COMMAND} -E env "PATH=${TEST_RUNTIME_PATH}"
+                                     $<TARGET_FILE:${MODULE_NAME}> ${TestName})
+  else()
+    add_test(${TestName} ${TESTING_OUTPUT_DIRECTORY}/${MODULE_NAME} ${TestName})
+  endif()
 endforeach()
 
 set_property(TARGET ${MODULE_NAME} PROPERTY FOLDER "FreeRDP/Test")

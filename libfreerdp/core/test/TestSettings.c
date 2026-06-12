@@ -11,6 +11,10 @@
 #include "settings_property_lists.h"
 #include "../settings.h"
 
+#ifndef ORIENTATION_PREFERENCE_LANDSCAPE
+#define ORIENTATION_PREFERENCE_LANDSCAPE 0x1
+#endif
+
 #define log_start() log_start_(__func__)
 static void log_start_(const char* fkt, ...)
 {
@@ -328,6 +332,31 @@ static BOOL test_helpers(void)
 		goto fail;
 
 	rc = TRUE;
+fail:
+	freerdp_settings_free(settings);
+	return log_result(rc);
+}
+
+static BOOL test_gfx_clearcodec_setting(void)
+{
+	log_start();
+	BOOL rc = FALSE;
+	rdpSettings* settings = freerdp_settings_new(0);
+	if (!settings)
+		goto fail;
+
+	if (freerdp_settings_get_bool(settings, FreeRDP_GfxClearCodec))
+		goto fail;
+	if (!freerdp_settings_set_bool(settings, FreeRDP_GfxClearCodec, TRUE))
+		goto fail;
+	if (!freerdp_settings_get_bool(settings, FreeRDP_GfxClearCodec))
+		goto fail;
+	if (strcmp(freerdp_settings_get_name_for_key(FreeRDP_GfxClearCodec),
+	           "FreeRDP_GfxClearCodec") != 0)
+		goto fail;
+
+	rc = TRUE;
+
 fail:
 	freerdp_settings_free(settings);
 	return log_result(rc);
@@ -2406,6 +2435,8 @@ int TestSettings(int argc, char* argv[])
 	if (!test_copy())
 		goto fail;
 	if (!test_helpers())
+		goto fail;
+	if (!test_gfx_clearcodec_setting())
 		goto fail;
 	if (!check_device_type())
 		goto fail;
