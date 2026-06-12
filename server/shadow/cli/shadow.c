@@ -105,6 +105,8 @@ int main(int argc, char** argv)
 		  "Allow GFX RFX codec" },
 		{ "gfx-planar", COMMAND_LINE_VALUE_BOOL, nullptr, BoolValueTrue, nullptr, -1, nullptr,
 		  "Allow GFX planar codec" },
+		{ "gfx-clearcodec", COMMAND_LINE_VALUE_BOOL, nullptr, BoolValueFalse, nullptr, -1, nullptr,
+		  "Allow GFX ClearCodec codec" },
 		{ "gfx-avc420", COMMAND_LINE_VALUE_BOOL, nullptr, BoolValueTrue, nullptr, -1, nullptr,
 		  "Allow GFX AVC420 codec" },
 		{ "gfx-avc444", COMMAND_LINE_VALUE_BOOL, nullptr, BoolValueTrue, nullptr, -1, nullptr,
@@ -151,6 +153,7 @@ int main(int argc, char** argv)
 		    !freerdp_settings_set_bool(settings, FreeRDP_GfxH264, TRUE) ||
 		    !freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, TRUE) ||
 		    !freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, TRUE) ||
+		    !freerdp_settings_set_bool(settings, FreeRDP_GfxClearCodec, FALSE) ||
 		    !freerdp_settings_set_bool(settings, FreeRDP_GfxProgressive, TRUE) ||
 		    !freerdp_settings_set_bool(settings, FreeRDP_GfxProgressiveV2, TRUE))
 			goto fail;

@@ -24,6 +24,7 @@
 
 #include <freerdp/freerdp.h>
 #include <freerdp/codecs.h>
+#include <freerdp/codec/clear.h>
 
 #include <freerdp/server/shadow.h>
 
@@ -47,6 +48,7 @@ struct rdp_shadow_encoder
 
 	RFX_CONTEXT* rfx;
 	NSC_CONTEXT* nsc;
+	CLEAR_CONTEXT* clear;
 	BITMAP_PLANAR_CONTEXT* planar;
 	BITMAP_INTERLEAVED_CONTEXT* interleaved;
 	H264_CONTEXT* h264;

@@ -31,10 +31,12 @@
 #include <winpr/interlocked.h>
 
 #include <freerdp/log.h>
+#include <freerdp/codec/clear.h>
 #include <freerdp/utils/gfx.h>
 #include <freerdp/channels/drdynvc.h>
 
 #include "shadow.h"
+#include "shadow_mcevent.h"
 
 #define TAG CLIENT_TAG("shadow")
 
@@ -308,6 +310,9 @@ static BOOL shadow_client_context_new(freerdp_peer* peer, rdpContext* context)
 		return FALSE;
 	if (!freerdp_settings_set_bool(settings, FreeRDP_GfxH264,
 	                               freerdp_settings_get_bool(srvSettings, FreeRDP_GfxH264)))
+		return FALSE;
+	if (!freerdp_settings_set_bool(settings, FreeRDP_GfxClearCodec,
+	                               freerdp_settings_get_bool(srvSettings, FreeRDP_GfxClearCodec)))
 		return FALSE;
 	if (!freerdp_settings_set_bool(settings, FreeRDP_DrawAllowSkipAlpha, TRUE))
 		return FALSE;
@@ -910,6 +915,13 @@ static UINT shadow_client_send_caps_confirm(RdpgfxServerContext* context, rdpSha
 	UINT rc = context->CapsConfirm(context, pdu);
 	client->areGfxCapsReady = (rc == CHANNEL_RC_OK);
 	client->confirmedCaps = *pdu->capsSet;
+	if (client->areGfxCapsReady)
+	{
+		shadow_client_mark_invalid(client, 0, nullptr);
+		/* Caps confirmation runs on the client thread, so publish without waiting for
+		 * that same thread to consume the update event. */
+		shadow_multiclient_publish(client->subsystem->updateEvent);
+	}
 
 	rdpSettings* clientSettings = client->context.settings;
 	WINPR_ASSERT(clientSettings);
@@ -1026,6 +1038,12 @@ static BOOL shadow_client_caps_test_version(RdpgfxServerContext* context, rdpSha
 			const BOOL planar = freerdp_settings_get_bool(srvSettings, FreeRDP_GfxPlanar);
 			if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxPlanar, planar))
 				return FALSE;
+
+			BOOL clear = FALSE;
+			if (freerdp_settings_get_bool(srvSettings, FreeRDP_GfxClearCodec))
+				clear = shadow_encoder_prepare(client->encoder, FREERDP_CODEC_CLEARCODEC) >= 0;
+			if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxClearCodec, clear))
+				return FALSE;
 #if defined(WITH_GFX_AV1)
 			const BOOL av1 = freerdp_settings_get_bool(srvSettings, FreeRDP_GfxCodecAV1);
 			if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxCodecAV1, av1))
@@ -1112,8 +1130,12 @@ static UINT shadow_client_rdpgfx_caps_advertise(RdpgfxServerContext* context,
 		RDPGFX_CAPVERSION_102,    RDPGFX_CAPVERSION_101, RDPGFX_CAPVERSION_10,
 	};
 
-	const BOOL h264 =
-	    shadow_encoder_prepare(client->encoder, FREERDP_CODEC_AVC420 | FREERDP_CODEC_AVC444) >= 0;
+	const BOOL h264Enabled = freerdp_settings_get_bool(srvSettings, FreeRDP_GfxH264) ||
+	                         freerdp_settings_get_bool(srvSettings, FreeRDP_GfxAVC444) ||
+	                         freerdp_settings_get_bool(srvSettings, FreeRDP_GfxAVC444v2);
+	const BOOL h264 = h264Enabled &&
+	                  (shadow_encoder_prepare(client->encoder,
+	                                           FREERDP_CODEC_AVC420 | FREERDP_CODEC_AVC444) >= 0);
 
 #if defined(WITH_GFX_AV1)
 	if (freerdp_settings_get_bool(clientSettings, FreeRDP_GfxCodecAV1))
@@ -1167,6 +1189,8 @@ static UINT shadow_client_rdpgfx_caps_advertise(RdpgfxServerContext* context,
 					return rc;
 				if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxAVC444, FALSE))
 					return rc;
+				if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxClearCodec, FALSE))
+					return rc;
 
 				if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxThinClient,
 				                               (flags & RDPGFX_CAPS_FLAG_THINCLIENT) != 0))
@@ -1207,6 +1231,8 @@ static UINT shadow_client_rdpgfx_caps_advertise(RdpgfxServerContext* context,
 				if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxAVC444, FALSE))
 					return rc;
 				if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxH264, FALSE))
+					return rc;
+				if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxClearCodec, FALSE))
 					return rc;
 
 				if (!freerdp_settings_set_bool(clientSettings, FreeRDP_GfxThinClient,
@@ -1609,6 +1635,53 @@ static BOOL shadow_client_send_planar(rdpShadowClient* client, const BYTE* pSrcD
 }
 
 WINPR_ATTR_NODISCARD
+static BOOL shadow_client_send_clearcodec(rdpShadowClient* client, const BYTE* pSrcData,
+                                          UINT32 nSrcStep, UINT32 SrcFormat,
+                                          RDPGFX_SURFACE_COMMAND* cmd,
+                                          const RDPGFX_START_FRAME_PDU* cmdstart,
+                                          const RDPGFX_END_FRAME_PDU* cmdend)
+{
+	WINPR_ASSERT(client);
+
+	rdpShadowEncoder* encoder = client->encoder;
+	WINPR_ASSERT(encoder);
+
+	UINT error = CHANNEL_RC_OK;
+	if (shadow_encoder_prepare(encoder, FREERDP_CODEC_CLEARCODEC) < 0)
+	{
+		WLog_WARN(TAG, "Failed to prepare encoder FREERDP_CODEC_CLEARCODEC, falling back");
+		return FALSE;
+	}
+
+	cmd->data = nullptr;
+	cmd->length = 0;
+	if (clear_encode(encoder->clear, pSrcData, SrcFormat, nSrcStep, cmd->left, cmd->top,
+	                 cmd->right - cmd->left, cmd->bottom - cmd->top, &cmd->data, &cmd->length,
+	                 nullptr) < 0)
+	{
+		WLog_WARN(TAG, "ClearCodec encode failed, falling back");
+		free(cmd->data);
+		cmd->data = nullptr;
+		return FALSE;
+	}
+
+	cmd->codecId = RDPGFX_CODECID_CLEARCODEC;
+	WLog_DBG(TAG, "Sending GFX surface update with %s", rdpgfx_get_codec_id_string(cmd->codecId));
+	IFCALLRET(client->rdpgfx->SurfaceFrameCommand, error, client->rdpgfx, cmd, cmdstart, cmdend);
+	free(cmd->data);
+	cmd->data = nullptr;
+
+	if (error)
+	{
+		WLog_WARN(TAG, "SurfaceFrameCommand failed for ClearCodec with error %" PRIu32
+		               ", falling back",
+		          error);
+		return FALSE;
+	}
+	return TRUE;
+}
+
+WINPR_ATTR_NODISCARD
 static BOOL shadow_client_send_uncompressed(rdpShadowClient* client, const BYTE* pSrcData,
                                             UINT32 nSrcStep, UINT32 SrcFormat,
                                             RDPGFX_SURFACE_COMMAND* cmd,
@@ -1683,6 +1756,31 @@ static BOOL shadow_avc420_enabled(const rdpShadowClient* client)
 	if (client->confirmedCaps.version != RDPGFX_CAPVERSION_81)
 		return FALSE;
 	return (client->confirmedCaps.flags & RDPGFX_CAPS_FLAG_AVC420_ENABLED) != 0;
+}
+
+WINPR_ATTR_NODISCARD
+static BOOL shadow_clearcodec_capable(const rdpShadowClient* client)
+{
+	WINPR_ASSERT(client);
+	if (!client->areGfxCapsReady)
+		return FALSE;
+
+	switch (client->confirmedCaps.version)
+	{
+		case RDPGFX_CAPVERSION_10:
+		case RDPGFX_CAPVERSION_101:
+		case RDPGFX_CAPVERSION_102:
+		case RDPGFX_CAPVERSION_103:
+		case RDPGFX_CAPVERSION_104:
+		case RDPGFX_CAPVERSION_105:
+		case RDPGFX_CAPVERSION_106:
+		case RDPGFX_CAPVERSION_106_ERR:
+		case RDPGFX_CAPVERSION_107:
+			return TRUE;
+
+		default:
+			return FALSE;
+	}
 }
 
 /**
@@ -1767,7 +1865,7 @@ static BOOL shadow_client_send_surface_gfx(rdpShadowClient* client, const BYTE* 
 	}
 
 #endif
-	    if (freerdp_settings_get_bool(settings, FreeRDP_RemoteFxCodec) && (id != 0))
+	if (freerdp_settings_get_bool(settings, FreeRDP_RemoteFxCodec) && (id != 0))
 	{
 		return shadow_client_send_rfx(client, pSrcData, nSrcStep, SrcFormat, nWidth, nHeight, &cmd,
 		                              &cmdstart, &cmdend);
@@ -1777,6 +1875,19 @@ static BOOL shadow_client_send_surface_gfx(rdpShadowClient* client, const BYTE* 
 	{
 		return shadow_client_send_progressive(client, pSrcData, nSrcStep, SrcFormat, nWidth,
 		                                      nHeight, &cmd, &cmdstart, &cmdend);
+	}
+
+	if (freerdp_settings_get_bool(settings, FreeRDP_GfxClearCodec))
+	{
+		if (shadow_clearcodec_capable(client))
+		{
+			if (shadow_client_send_clearcodec(client, pSrcData, nSrcStep, SrcFormat, &cmd,
+			                                  &cmdstart, &cmdend))
+				return TRUE;
+			WLog_DBG(TAG, "Falling back from ClearCodec to planar/uncompressed GFX codec");
+		}
+		else
+			WLog_DBG(TAG, "Skipping ClearCodec: RDPGFX capability negotiation is not ready");
 	}
 
 	if (freerdp_settings_get_bool(settings, FreeRDP_GfxPlanar))
@@ -2788,7 +2899,8 @@ static DWORD WINAPI shadow_client_thread(LPVOID arg)
 
 				case DRDYNVC_STATE_READY:
 #if defined(CHANNEL_AUDIN_SERVER)
-					if (client->audin && !IFCALLRESULT(TRUE, client->audin->IsOpen, client->audin))
+					if (freerdp_settings_get_bool(settings, FreeRDP_AudioCapture) && client->audin &&
+					    !IFCALLRESULT(TRUE, client->audin->IsOpen, client->audin))
 					{
 						if (!IFCALLRESULT(FALSE, client->audin->Open, client->audin))
 						{

@@ -24,6 +24,7 @@
 #include <winpr/crt.h>
 #include <winpr/print.h>
 #include <winpr/bitstream.h>
+#include <winpr/stream.h>
 
 #include <freerdp/codec/color.h>
 #include <freerdp/codec/clear.h>
@@ -42,6 +43,8 @@ typedef struct
 {
 	UINT32 size;
 	UINT32 count;
+	UINT32 width;
+	UINT32 height;
 	UINT32* pixels;
 } CLEAR_GLYPH_ENTRY;
 
@@ -61,13 +64,25 @@ struct S_CLEAR_CONTEXT
 	size_t TempSize;
 	UINT32 format;
 	BOOL formatSet;
+	UINT32 nscTolerance;
+	UINT32 GlyphCacheCursor;
 	CLEAR_GLYPH_ENTRY GlyphCache[4000];
 	UINT32 VBarStorageCursor;
+	UINT32 VBarStorageCount;
 	CLEAR_VBAR_ENTRY VBarStorage[CLEARCODEC_VBAR_SIZE];
 	UINT32 ShortVBarStorageCursor;
+	UINT32 ShortVBarStorageCount;
 	CLEAR_VBAR_ENTRY ShortVBarStorage[CLEARCODEC_VBAR_SHORT_SIZE];
+	BOOL VBarResetPending;
 	wLog* log;
 };
+
+typedef struct
+{
+	BYTE r;
+	BYTE g;
+	BYTE b;
+} CLEAR_BGR;
 
 static const UINT32 CLEAR_LOG2_FLOOR[256] = {
 	0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
@@ -93,6 +108,7 @@ static void clear_reset_vbar_storage(CLEAR_CONTEXT* WINPR_RESTRICT clear, BOOL z
 	}
 
 	clear->VBarStorageCursor = 0;
+	clear->VBarStorageCount = 0;
 
 	if (zero)
 	{
@@ -103,6 +119,7 @@ static void clear_reset_vbar_storage(CLEAR_CONTEXT* WINPR_RESTRICT clear, BOOL z
 	}
 
 	clear->ShortVBarStorageCursor = 0;
+	clear->ShortVBarStorageCount = 0;
 }
 
 static void clear_reset_glyph_cache(CLEAR_CONTEXT* WINPR_RESTRICT clear)
@@ -392,6 +409,15 @@ static BOOL clear_decompress_residual_data(CLEAR_CONTEXT* WINPR_RESTRICT clear,
 		UINT32 runLengthFactor = 0;
 		UINT32 color = 0;
 
+		if ((residualByteCount - suboffset) < 4)
+		{
+			WLog_Print(clear->log, WLOG_ERROR,
+			           "residual run header exceeds residualByteCount %" PRIu32 " at offset %" PRIu32
+			           "",
+			           residualByteCount, suboffset);
+			return FALSE;
+		}
+
 		if (!Stream_CheckAndLogRequiredLengthWLog(clear->log, s, 4))
 			return FALSE;
 
@@ -404,6 +430,15 @@ static BOOL clear_decompress_residual_data(CLEAR_CONTEXT* WINPR_RESTRICT clear,
 
 		if (runLengthFactor >= 0xFF)
 		{
+			if ((residualByteCount - suboffset) < 2)
+			{
+				WLog_Print(clear->log, WLOG_ERROR,
+				           "residual extended run header exceeds residualByteCount %" PRIu32
+				           " at offset %" PRIu32 "",
+				           residualByteCount, suboffset);
+				return FALSE;
+			}
+
 			if (!Stream_CheckAndLogRequiredLengthWLog(clear->log, s, 2))
 				return FALSE;
 
@@ -412,6 +447,15 @@ static BOOL clear_decompress_residual_data(CLEAR_CONTEXT* WINPR_RESTRICT clear,
 
 			if (runLengthFactor >= 0xFFFF)
 			{
+				if ((residualByteCount - suboffset) < 4)
+				{
+					WLog_Print(clear->log, WLOG_ERROR,
+					           "residual long run header exceeds residualByteCount %" PRIu32
+					           " at offset %" PRIu32 "",
+					           residualByteCount, suboffset);
+					return FALSE;
+				}
+
 				if (!Stream_CheckAndLogRequiredLengthWLog(clear->log, s, 4))
 					return FALSE;
 
@@ -467,6 +511,15 @@ static BOOL clear_decompress_subcodecs_data(CLEAR_CONTEXT* WINPR_RESTRICT clear,
 
 	while (suboffset < subcodecByteCount)
 	{
+		if ((subcodecByteCount - suboffset) < 13)
+		{
+			WLog_Print(clear->log, WLOG_ERROR,
+			           "subcodec header exceeds subcodecByteCount %" PRIu32 " at offset %" PRIu32
+			           "",
+			           subcodecByteCount, suboffset);
+			return FALSE;
+		}
+
 		if (!Stream_CheckAndLogRequiredLengthWLog(clear->log, s, 13))
 			return FALSE;
 
@@ -478,8 +531,24 @@ static BOOL clear_decompress_subcodecs_data(CLEAR_CONTEXT* WINPR_RESTRICT clear,
 		const UINT8 subcodecId = Stream_Get_UINT8(s);
 		suboffset += 13;
 
+		if ((subcodecByteCount - suboffset) < bitmapDataByteCount)
+		{
+			WLog_Print(clear->log, WLOG_ERROR,
+			           "bitmapDataByteCount %" PRIu32 " exceeds subcodecByteCount %" PRIu32
+			           " at offset %" PRIu32 "",
+			           bitmapDataByteCount, subcodecByteCount, suboffset);
+			return FALSE;
+		}
+
 		if (!Stream_CheckAndLogRequiredLengthWLog(clear->log, s, bitmapDataByteCount))
 			return FALSE;
+
+		if ((width == 0) || (height == 0))
+		{
+			WLog_Print(clear->log, WLOG_ERROR, "invalid raw subcodec dimensions %" PRIu16 "x%" PRIu16,
+			           width, height);
+			return FALSE;
+		}
 
 		const UINT32 nXDstRel = nXDst + xStart;
 		const UINT32 nYDstRel = nYDst + yStart;
@@ -1173,6 +1242,14 @@ INT32 clear_decompress(CLEAR_CONTEXT* WINPR_RESTRICT clear, const BYTE* WINPR_RE
 	Stream_Read_UINT32(s, bandsByteCount);
 	Stream_Read_UINT32(s, subcodecByteCount);
 
+	if ((residualByteCount > 0) && (subcodecByteCount > 0))
+	{
+		WLog_Print(clear->log, WLOG_ERROR,
+		           "residualByteCount %" PRIu32 " overlaps subcodecByteCount %" PRIu32 "",
+		           residualByteCount, subcodecByteCount);
+		goto fail;
+	}
+
 	if (residualByteCount > 0)
 	{
 		if (!clear_decompress_residual_data(clear, s, residualByteCount, nWidth, nHeight, pDstData,
@@ -1281,6 +1358,1157 @@ int clear_compress(WINPR_ATTR_UNUSED CLEAR_CONTEXT* WINPR_RESTRICT clear,
 }
 #endif
 
+static BOOL clear_encode_write_run(BYTE* WINPR_RESTRICT dst, size_t capacity,
+                                   size_t* WINPR_RESTRICT offset, BYTE r, BYTE g, BYTE b,
+                                   UINT32 runLength)
+{
+	if (!dst || !offset || (runLength == 0))
+		return FALSE;
+
+	const size_t required =
+	    (runLength < 0xFF) ? 4 : ((runLength < 0xFFFF) ? 6 : 10);
+	if (*offset > capacity || required > capacity - *offset)
+		return FALSE;
+
+	dst[(*offset)++] = b;
+	dst[(*offset)++] = g;
+	dst[(*offset)++] = r;
+
+	if (runLength < 0xFF)
+	{
+		dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, runLength);
+	}
+	else if (runLength < 0xFFFF)
+	{
+		dst[(*offset)++] = 0xFF;
+		dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, runLength & 0xFF);
+		dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, (runLength >> 8) & 0xFF);
+	}
+	else
+	{
+		dst[(*offset)++] = 0xFF;
+		dst[(*offset)++] = 0xFF;
+		dst[(*offset)++] = 0xFF;
+		dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, runLength & 0xFF);
+		dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, (runLength >> 8) & 0xFF);
+		dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, (runLength >> 16) & 0xFF);
+		dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, (runLength >> 24) & 0xFF);
+	}
+
+	return TRUE;
+}
+
+static BOOL clear_encode_write_run_factor(BYTE* WINPR_RESTRICT dst, size_t capacity,
+                                          size_t* WINPR_RESTRICT offset, UINT32 runLength)
+{
+	if (!dst || !offset)
+		return FALSE;
+
+	const size_t required = (runLength < 0xFF) ? 1 : ((runLength < 0xFFFF) ? 3 : 7);
+	if ((*offset > capacity) || (required > capacity - *offset))
+		return FALSE;
+
+	if (runLength < 0xFF)
+	{
+		dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, runLength);
+	}
+	else if (runLength < 0xFFFF)
+	{
+		dst[(*offset)++] = 0xFF;
+		dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, runLength & 0xFF);
+		dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, (runLength >> 8) & 0xFF);
+	}
+	else
+	{
+		dst[(*offset)++] = 0xFF;
+		dst[(*offset)++] = 0xFF;
+		dst[(*offset)++] = 0xFF;
+		dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, runLength & 0xFF);
+		dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, (runLength >> 8) & 0xFF);
+		dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, (runLength >> 16) & 0xFF);
+		dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, (runLength >> 24) & 0xFF);
+	}
+
+	return TRUE;
+}
+
+static void clear_encode_read_bgr(const BYTE* WINPR_RESTRICT src, UINT32 SrcFormat,
+                                  const gdiPalette* WINPR_RESTRICT palette,
+                                  BYTE* WINPR_RESTRICT r, BYTE* WINPR_RESTRICT g,
+                                  BYTE* WINPR_RESTRICT b)
+{
+	BYTE a = 0;
+	const UINT32 color = FreeRDPReadColor(src, SrcFormat);
+
+	FreeRDPSplitColor(color, SrcFormat, r, g, b, &a, palette);
+}
+
+static BOOL clear_encode_residual(CLEAR_CONTEXT* WINPR_RESTRICT clear,
+                                  const BYTE* WINPR_RESTRICT pSrcData, UINT32 SrcFormat,
+                                  UINT32 SrcStep, UINT32 SrcX, UINT32 SrcY, UINT32 nWidth,
+                                  UINT32 nHeight, BYTE* WINPR_RESTRICT dst, size_t capacity,
+                                  size_t* WINPR_RESTRICT offset,
+                                  const gdiPalette* WINPR_RESTRICT palette)
+{
+	WINPR_ASSERT(clear);
+	WINPR_ASSERT(pSrcData);
+	WINPR_ASSERT(dst);
+	WINPR_ASSERT(offset);
+
+	const UINT32 bpp = FreeRDPGetBytesPerPixel(SrcFormat);
+	BYTE runR = 0;
+	BYTE runG = 0;
+	BYTE runB = 0;
+	UINT32 runLength = 0;
+
+	for (UINT32 y = 0; y < nHeight; y++)
+	{
+		const BYTE* line = &pSrcData[(1ULL * (SrcY + y) * SrcStep) + (1ULL * SrcX * bpp)];
+
+		for (UINT32 x = 0; x < nWidth; x++)
+		{
+			BYTE r = 0;
+			BYTE g = 0;
+			BYTE b = 0;
+
+			clear_encode_read_bgr(&line[1ULL * x * bpp], SrcFormat, palette, &r, &g, &b);
+
+			if ((runLength > 0) && (r == runR) && (g == runG) && (b == runB) &&
+			    (runLength < UINT32_MAX))
+			{
+				runLength++;
+				continue;
+			}
+
+			if (runLength > 0)
+			{
+				if (!clear_encode_write_run(dst, capacity, offset, runR, runG, runB, runLength))
+					return FALSE;
+			}
+
+			runR = r;
+			runG = g;
+			runB = b;
+			runLength = 1;
+		}
+	}
+
+	return clear_encode_write_run(dst, capacity, offset, runR, runG, runB, runLength);
+}
+
+static BOOL clear_encode_write_uint16(BYTE* WINPR_RESTRICT dst, size_t capacity,
+                                      size_t* WINPR_RESTRICT offset, UINT16 value)
+{
+	if (!dst || !offset || (*offset > capacity) || (capacity - *offset < 2))
+		return FALSE;
+
+	dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, value & 0xFF);
+	dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, (value >> 8) & 0xFF);
+	return TRUE;
+}
+
+static BOOL clear_encode_write_uint32(BYTE* WINPR_RESTRICT dst, size_t capacity,
+                                      size_t* WINPR_RESTRICT offset, UINT32 value)
+{
+	if (!dst || !offset || (*offset > capacity) || (capacity - *offset < 4))
+		return FALSE;
+
+	dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, value & 0xFF);
+	dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, (value >> 8) & 0xFF);
+	dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, (value >> 16) & 0xFF);
+	dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, (value >> 24) & 0xFF);
+	return TRUE;
+}
+
+static BOOL clear_encode_raw_subcodec(const BYTE* WINPR_RESTRICT pSrcData, UINT32 SrcFormat,
+                                       UINT32 SrcStep, UINT32 SrcX, UINT32 SrcY, UINT32 nWidth,
+                                       UINT32 nHeight, BYTE* WINPR_RESTRICT dst, size_t capacity,
+                                       size_t* WINPR_RESTRICT offset,
+                                       const gdiPalette* WINPR_RESTRICT palette)
+{
+	WINPR_ASSERT(pSrcData);
+	WINPR_ASSERT(dst);
+	WINPR_ASSERT(offset);
+
+	const UINT32 bpp = FreeRDPGetBytesPerPixel(SrcFormat);
+	const UINT32 bitmapDataByteCount = nWidth * nHeight * 3;
+
+	if (!clear_encode_write_uint16(dst, capacity, offset, 0))
+		return FALSE;
+	if (!clear_encode_write_uint16(dst, capacity, offset, 0))
+		return FALSE;
+	if (!clear_encode_write_uint16(dst, capacity, offset, WINPR_ASSERTING_INT_CAST(UINT16, nWidth)))
+		return FALSE;
+	if (!clear_encode_write_uint16(dst, capacity, offset, WINPR_ASSERTING_INT_CAST(UINT16, nHeight)))
+		return FALSE;
+	if (!clear_encode_write_uint32(dst, capacity, offset, bitmapDataByteCount))
+		return FALSE;
+
+	if ((*offset > capacity) || (capacity - *offset < 1))
+		return FALSE;
+	dst[(*offset)++] = 0; /* Uncompressed raw BGR24 subcodec. */
+
+	if ((*offset > capacity) || (capacity - *offset < bitmapDataByteCount))
+		return FALSE;
+
+	for (UINT32 y = 0; y < nHeight; y++)
+	{
+		const BYTE* line = &pSrcData[(1ULL * (SrcY + y) * SrcStep) + (1ULL * SrcX * bpp)];
+
+		for (UINT32 x = 0; x < nWidth; x++)
+		{
+			BYTE r = 0;
+			BYTE g = 0;
+			BYTE b = 0;
+
+			clear_encode_read_bgr(&line[1ULL * x * bpp], SrcFormat, palette, &r, &g, &b);
+			dst[(*offset)++] = b;
+			dst[(*offset)++] = g;
+			dst[(*offset)++] = r;
+		}
+	}
+
+	return TRUE;
+}
+
+static UINT32 clear_encode_normalized_color(const BYTE* WINPR_RESTRICT src, UINT32 SrcFormat,
+                                            const gdiPalette* WINPR_RESTRICT palette);
+
+static BOOL clear_encode_vbar_matches(CLEAR_CONTEXT* WINPR_RESTRICT clear,
+                                       const CLEAR_VBAR_ENTRY* WINPR_RESTRICT entry,
+                                       const BYTE* WINPR_RESTRICT pSrcData, UINT32 SrcFormat,
+                                       UINT32 SrcStep, UINT32 SrcX, UINT32 SrcY, UINT32 x,
+                                       UINT32 nHeight, const gdiPalette* WINPR_RESTRICT palette)
+{
+	const UINT32 bpp = FreeRDPGetBytesPerPixel(SrcFormat);
+
+	if (!entry || !entry->pixels || (entry->count != nHeight))
+		return FALSE;
+
+	for (UINT32 y = 0; y < nHeight; y++)
+	{
+		const BYTE* srcPixel =
+		    &pSrcData[(1ULL * (SrcY + y) * SrcStep) + (1ULL * (SrcX + x) * bpp)];
+		const UINT32 srcColor = clear_encode_normalized_color(srcPixel, SrcFormat, palette);
+		const UINT32 cachedColor =
+		    FreeRDPReadColor(&entry->pixels[1ULL * y * FreeRDPGetBytesPerPixel(clear->format)],
+		                     clear->format);
+
+		if (srcColor != cachedColor)
+			return FALSE;
+	}
+
+	return TRUE;
+}
+
+static BOOL clear_encode_find_vbar(CLEAR_CONTEXT* WINPR_RESTRICT clear,
+                                   const BYTE* WINPR_RESTRICT pSrcData, UINT32 SrcFormat,
+                                   UINT32 SrcStep, UINT32 SrcX, UINT32 SrcY, UINT32 x,
+                                   UINT32 nHeight, const gdiPalette* WINPR_RESTRICT palette,
+                                   UINT16* WINPR_RESTRICT vBarIndex)
+{
+	const UINT32 count = clear->VBarStorageCount;
+	if (count > 4096)
+		return FALSE;
+
+	for (UINT32 index = 0; index < count; index++)
+	{
+		if (clear_encode_vbar_matches(clear, &clear->VBarStorage[index], pSrcData, SrcFormat,
+		                              SrcStep, SrcX, SrcY, x, nHeight, palette))
+		{
+			*vBarIndex = WINPR_ASSERTING_INT_CAST(UINT16, index);
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
+static BOOL clear_encode_store_vbar(CLEAR_CONTEXT* WINPR_RESTRICT clear,
+                                    const BYTE* WINPR_RESTRICT pSrcData, UINT32 SrcFormat,
+                                    UINT32 SrcStep, UINT32 SrcX, UINT32 SrcY, UINT32 x,
+                                    UINT32 nHeight, const gdiPalette* WINPR_RESTRICT palette,
+                                    UINT16* WINPR_RESTRICT vBarIndex)
+{
+	WINPR_ASSERT(clear->VBarStorageCursor < CLEARCODEC_VBAR_SIZE);
+
+	const UINT32 bpp = FreeRDPGetBytesPerPixel(SrcFormat);
+	CLEAR_VBAR_ENTRY* entry = &clear->VBarStorage[clear->VBarStorageCursor];
+	entry->count = nHeight;
+
+	if (!resize_vbar_entry(clear, entry))
+		return FALSE;
+
+	for (UINT32 y = 0; y < nHeight; y++)
+	{
+		BYTE* dstPixel = &entry->pixels[1ULL * y * FreeRDPGetBytesPerPixel(clear->format)];
+		const BYTE* srcPixel =
+		    &pSrcData[(1ULL * (SrcY + y) * SrcStep) + (1ULL * (SrcX + x) * bpp)];
+		const UINT32 color = clear_encode_normalized_color(srcPixel, SrcFormat, palette);
+
+		if (!FreeRDPWriteColor(dstPixel, clear->format, color))
+			return FALSE;
+	}
+
+	*vBarIndex = WINPR_ASSERTING_INT_CAST(UINT16, clear->VBarStorageCursor);
+	clear->VBarStorageCursor = (clear->VBarStorageCursor + 1) % CLEARCODEC_VBAR_SIZE;
+	if (clear->VBarStorageCount < CLEARCODEC_VBAR_SIZE)
+		clear->VBarStorageCount++;
+	return TRUE;
+}
+
+static BOOL clear_encode_store_short_vbar(CLEAR_CONTEXT* WINPR_RESTRICT clear,
+                                          const CLEAR_VBAR_ENTRY* WINPR_RESTRICT vBarEntry,
+                                          UINT32 nHeight)
+{
+	WINPR_ASSERT(clear->ShortVBarStorageCursor < CLEARCODEC_VBAR_SHORT_SIZE);
+
+	CLEAR_VBAR_ENTRY* shortEntry = &clear->ShortVBarStorage[clear->ShortVBarStorageCursor];
+	shortEntry->count = nHeight;
+
+	if (!resize_vbar_entry(clear, shortEntry))
+		return FALSE;
+
+	CopyMemory(shortEntry->pixels, vBarEntry->pixels,
+	           1ULL * nHeight * FreeRDPGetBytesPerPixel(clear->format));
+	clear->ShortVBarStorageCursor =
+	    (clear->ShortVBarStorageCursor + 1) % CLEARCODEC_VBAR_SHORT_SIZE;
+	if (clear->ShortVBarStorageCount < CLEARCODEC_VBAR_SHORT_SIZE)
+		clear->ShortVBarStorageCount++;
+	return TRUE;
+}
+
+static BOOL clear_encode_bands(CLEAR_CONTEXT* WINPR_RESTRICT clear,
+                               const BYTE* WINPR_RESTRICT pSrcData, UINT32 SrcFormat,
+                               UINT32 SrcStep, UINT32 SrcX, UINT32 SrcY, UINT32 nWidth,
+                               UINT32 nHeight, BYTE* WINPR_RESTRICT dst, size_t capacity,
+                               size_t* WINPR_RESTRICT offset,
+                               const gdiPalette* WINPR_RESTRICT palette)
+{
+	WINPR_ASSERT(clear);
+	WINPR_ASSERT(pSrcData);
+	WINPR_ASSERT(dst);
+	WINPR_ASSERT(offset);
+
+	if (nHeight > 52)
+		return FALSE;
+
+	if (!clear_encode_write_uint16(dst, capacity, offset, 0))
+		return FALSE;
+	if (!clear_encode_write_uint16(dst, capacity, offset,
+	                               WINPR_ASSERTING_INT_CAST(UINT16, nWidth - 1)))
+		return FALSE;
+	if (!clear_encode_write_uint16(dst, capacity, offset, 0))
+		return FALSE;
+	if (!clear_encode_write_uint16(dst, capacity, offset,
+	                               WINPR_ASSERTING_INT_CAST(UINT16, nHeight - 1)))
+		return FALSE;
+
+	if ((*offset > capacity) || (capacity - *offset < 3))
+		return FALSE;
+	dst[(*offset)++] = 0;
+	dst[(*offset)++] = 0;
+	dst[(*offset)++] = 0;
+
+	const UINT32 bpp = FreeRDPGetBytesPerPixel(SrcFormat);
+	const UINT32 previousBase =
+	    (clear->VBarStorageCursor + CLEARCODEC_VBAR_SIZE - nWidth) % CLEARCODEC_VBAR_SIZE;
+	for (UINT32 x = 0; x < nWidth; x++)
+	{
+		const UINT16 previousIndex =
+		    WINPR_ASSERTING_INT_CAST(UINT16, (previousBase + x) % CLEARCODEC_VBAR_SIZE);
+		if (!clear->VBarResetPending &&
+		    clear_encode_vbar_matches(clear, &clear->VBarStorage[previousIndex], pSrcData,
+		                              SrcFormat, SrcStep, SrcX, SrcY, x, nHeight, palette))
+		{
+			if (!clear_encode_write_uint16(dst, capacity, offset, 0x8000 | previousIndex))
+				return FALSE;
+			continue;
+		}
+
+		if (!clear_encode_write_uint16(dst, capacity, offset,
+		                               WINPR_ASSERTING_INT_CAST(UINT16, nHeight << 8)))
+			return FALSE;
+		if ((*offset > capacity) || (capacity - *offset < 1ULL * nHeight * 3ULL))
+			return FALSE;
+
+		for (UINT32 y = 0; y < nHeight; y++)
+		{
+			BYTE r = 0;
+			BYTE g = 0;
+			BYTE b = 0;
+			const BYTE* srcPixel =
+			    &pSrcData[(1ULL * (SrcY + y) * SrcStep) + (1ULL * (SrcX + x) * bpp)];
+
+			clear_encode_read_bgr(srcPixel, SrcFormat, palette, &r, &g, &b);
+			dst[(*offset)++] = b;
+			dst[(*offset)++] = g;
+			dst[(*offset)++] = r;
+		}
+
+		UINT16 vBarIndex = 0;
+		if (!clear_encode_store_vbar(clear, pSrcData, SrcFormat, SrcStep, SrcX, SrcY, x, nHeight,
+		                             palette, &vBarIndex))
+			return FALSE;
+		if (!clear_encode_store_short_vbar(clear, &clear->VBarStorage[vBarIndex], nHeight))
+			return FALSE;
+	}
+
+	return TRUE;
+}
+
+static BOOL clear_encode_bands_size(CLEAR_CONTEXT* WINPR_RESTRICT clear,
+                                    const BYTE* WINPR_RESTRICT pSrcData, UINT32 SrcFormat,
+                                    UINT32 SrcStep, UINT32 SrcX, UINT32 SrcY, UINT32 nWidth,
+                                    UINT32 nHeight, const gdiPalette* WINPR_RESTRICT palette,
+                                    size_t* WINPR_RESTRICT size)
+{
+	WINPR_ASSERT(clear);
+	WINPR_ASSERT(size);
+
+	if ((nHeight > 52) || (nWidth < 32))
+		return FALSE;
+
+	size_t candidate = 11;
+	const UINT32 previousBase =
+	    (clear->VBarStorageCursor + CLEARCODEC_VBAR_SIZE - nWidth) % CLEARCODEC_VBAR_SIZE;
+	for (UINT32 x = 0; x < nWidth; x++)
+	{
+		const UINT16 previousIndex =
+		    WINPR_ASSERTING_INT_CAST(UINT16, (previousBase + x) % CLEARCODEC_VBAR_SIZE);
+		if (!clear->VBarResetPending &&
+		    clear_encode_vbar_matches(clear, &clear->VBarStorage[previousIndex], pSrcData,
+		                              SrcFormat, SrcStep, SrcX, SrcY, x, nHeight, palette))
+			candidate += 2;
+		else
+			candidate += 2ULL + 3ULL * nHeight;
+	}
+
+	*size = candidate;
+	return TRUE;
+}
+
+static BOOL clear_encode_find_palette_index(const CLEAR_BGR* WINPR_RESTRICT palette,
+                                            UINT32 paletteCount, BYTE r, BYTE g, BYTE b,
+                                            BYTE* WINPR_RESTRICT index)
+{
+	for (UINT32 x = 0; x < paletteCount; x++)
+	{
+		if ((palette[x].r == r) && (palette[x].g == g) && (palette[x].b == b))
+		{
+			*index = WINPR_ASSERTING_INT_CAST(BYTE, x);
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
+static BOOL clear_encode_rlex_subcodec(const BYTE* WINPR_RESTRICT pSrcData, UINT32 SrcFormat,
+                                       UINT32 SrcStep, UINT32 SrcX, UINT32 SrcY, UINT32 nWidth,
+                                       UINT32 nHeight, BYTE* WINPR_RESTRICT dst, size_t capacity,
+                                       size_t* WINPR_RESTRICT offset,
+                                       const gdiPalette* WINPR_RESTRICT palette)
+{
+	WINPR_ASSERT(pSrcData);
+	WINPR_ASSERT(dst);
+	WINPR_ASSERT(offset);
+
+	const UINT32 bpp = FreeRDPGetBytesPerPixel(SrcFormat);
+	const UINT32 pixelCount = nWidth * nHeight;
+	CLEAR_BGR colors[127] = { 0 };
+	UINT32 colorCount = 0;
+	BYTE* indexes = calloc(pixelCount, sizeof(BYTE));
+	BOOL rc = FALSE;
+
+	if (!indexes)
+		return FALSE;
+
+	for (UINT32 y = 0; y < nHeight; y++)
+	{
+		const BYTE* line = &pSrcData[(1ULL * (SrcY + y) * SrcStep) + (1ULL * SrcX * bpp)];
+
+		for (UINT32 x = 0; x < nWidth; x++)
+		{
+			BYTE r = 0;
+			BYTE g = 0;
+			BYTE b = 0;
+			BYTE index = 0;
+			const UINT32 pixelIndex = y * nWidth + x;
+
+			clear_encode_read_bgr(&line[1ULL * x * bpp], SrcFormat, palette, &r, &g, &b);
+
+			if (!clear_encode_find_palette_index(colors, colorCount, r, g, b, &index))
+			{
+				if (colorCount >= ARRAYSIZE(colors))
+					goto fail;
+
+				index = WINPR_ASSERTING_INT_CAST(BYTE, colorCount);
+				colors[colorCount].r = r;
+				colors[colorCount].g = g;
+				colors[colorCount].b = b;
+				colorCount++;
+			}
+
+			indexes[pixelIndex] = index;
+		}
+	}
+
+	if ((colorCount == 0) || (colorCount > 127))
+		goto fail;
+
+	if (!clear_encode_write_uint16(dst, capacity, offset, 0))
+		goto fail;
+	if (!clear_encode_write_uint16(dst, capacity, offset, 0))
+		goto fail;
+	if (!clear_encode_write_uint16(dst, capacity, offset, WINPR_ASSERTING_INT_CAST(UINT16, nWidth)))
+		goto fail;
+	if (!clear_encode_write_uint16(dst, capacity, offset, WINPR_ASSERTING_INT_CAST(UINT16, nHeight)))
+		goto fail;
+
+	const size_t bitmapCountOffset = *offset;
+	if (!clear_encode_write_uint32(dst, capacity, offset, 0))
+		goto fail;
+
+	if ((*offset > capacity) || (capacity - *offset < 1))
+		goto fail;
+	dst[(*offset)++] = 2; /* CLEARCODEC_SUBCODEC_RLEX */
+
+	const size_t rlexStart = *offset;
+	if ((*offset > capacity) || (capacity - *offset < (1ULL + 3ULL * colorCount)))
+		goto fail;
+
+	dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, colorCount);
+	for (UINT32 x = 0; x < colorCount; x++)
+	{
+		dst[(*offset)++] = colors[x].b;
+		dst[(*offset)++] = colors[x].g;
+		dst[(*offset)++] = colors[x].r;
+	}
+
+	const UINT32 numBits = CLEAR_LOG2_FLOOR[colorCount - 1] + 1;
+	const UINT32 maxSuiteDepth = (1U << (8 - numBits)) - 1U;
+	UINT32 pixelIndex = 0;
+
+	while (pixelIndex < pixelCount)
+	{
+		const BYTE startIndex = indexes[pixelIndex];
+		UINT32 runLength = 0;
+		UINT32 suiteDepth = 0;
+		UINT32 consume = 1;
+
+		while ((pixelIndex + consume < pixelCount) &&
+		       (indexes[pixelIndex + consume] == startIndex))
+			consume++;
+
+		if (consume > 1)
+		{
+			runLength = consume - 1;
+			suiteDepth = 0;
+		}
+		else
+		{
+			while ((suiteDepth < maxSuiteDepth) && (pixelIndex + suiteDepth + 1 < pixelCount) &&
+			       ((UINT32)startIndex + suiteDepth + 1 < colorCount) &&
+			       (indexes[pixelIndex + suiteDepth + 1] ==
+			        (BYTE)(startIndex + suiteDepth + 1)))
+			{
+				suiteDepth++;
+			}
+			consume = suiteDepth + 1;
+		}
+
+		const BYTE stopIndex = WINPR_ASSERTING_INT_CAST(BYTE, startIndex + suiteDepth);
+		const BYTE tmp = WINPR_ASSERTING_INT_CAST(BYTE, (suiteDepth << numBits) | stopIndex);
+
+		if ((*offset > capacity) || (capacity - *offset < 1))
+			goto fail;
+		dst[(*offset)++] = tmp;
+
+		if (!clear_encode_write_run_factor(dst, capacity, offset, runLength))
+			goto fail;
+
+		pixelIndex += consume;
+	}
+
+	const size_t rlexSize = *offset - rlexStart;
+	if (rlexSize > UINT32_MAX)
+		goto fail;
+
+	dst[bitmapCountOffset + 0] = WINPR_ASSERTING_INT_CAST(BYTE, rlexSize & 0xFF);
+	dst[bitmapCountOffset + 1] = WINPR_ASSERTING_INT_CAST(BYTE, (rlexSize >> 8) & 0xFF);
+	dst[bitmapCountOffset + 2] = WINPR_ASSERTING_INT_CAST(BYTE, (rlexSize >> 16) & 0xFF);
+	dst[bitmapCountOffset + 3] = WINPR_ASSERTING_INT_CAST(BYTE, (rlexSize >> 24) & 0xFF);
+
+	rc = TRUE;
+
+fail:
+	free(indexes);
+	return rc;
+}
+
+static BOOL clear_encode_nsc_subcodec(CLEAR_CONTEXT* WINPR_RESTRICT clear,
+                                      const BYTE* WINPR_RESTRICT pSrcData, UINT32 SrcFormat,
+                                      UINT32 SrcStep, UINT32 SrcX, UINT32 SrcY, UINT32 nWidth,
+                                      UINT32 nHeight, BYTE* WINPR_RESTRICT dst, size_t capacity,
+                                      size_t* WINPR_RESTRICT offset)
+{
+	WINPR_ASSERT(clear);
+	WINPR_ASSERT(pSrcData);
+	WINPR_ASSERT(dst);
+	WINPR_ASSERT(offset);
+
+	if (!clear->nsc)
+		return FALSE;
+
+	const UINT32 bpp = FreeRDPGetBytesPerPixel(SrcFormat);
+	const UINT64 pixelCount = 1ULL * nWidth * nHeight;
+	const UINT64 streamCapacity = 4096ULL + pixelCount * 16ULL;
+	const UINT32 verifyStep = nWidth * bpp;
+
+	if (streamCapacity > SIZE_MAX)
+		return FALSE;
+
+	BYTE* input = calloc(nHeight, verifyStep);
+	if (!input)
+		return FALSE;
+
+	for (UINT32 y = 0; y < nHeight; y++)
+	{
+		const BYTE* srcLine = &pSrcData[(1ULL * (SrcY + y) * SrcStep) + (1ULL * SrcX * bpp)];
+		BYTE* dstLine = &input[1ULL * (nHeight - 1 - y) * verifyStep];
+		CopyMemory(dstLine, srcLine, verifyStep);
+	}
+
+	wStream* s = Stream_New(nullptr, WINPR_ASSERTING_INT_CAST(size_t, streamCapacity));
+	if (!s)
+	{
+		free(input);
+		return FALSE;
+	}
+
+	BYTE* decoded = calloc(nHeight, verifyStep);
+	if (!decoded)
+	{
+		free(input);
+		Stream_Free(s, TRUE);
+		return FALSE;
+	}
+
+	BOOL rc = FALSE;
+	if (!nsc_context_set_parameters(clear->nsc, NSC_COLOR_FORMAT, SrcFormat))
+		goto fail;
+	if (!nsc_context_set_parameters(clear->nsc, NSC_COLOR_LOSS_LEVEL, 1))
+		goto fail;
+	if (!nsc_context_set_parameters(clear->nsc, NSC_ALLOW_SUBSAMPLING, 0))
+		goto fail;
+
+	if (!nsc_compose_message(clear->nsc, s, input, nWidth, nHeight, verifyStep))
+		goto fail;
+
+	const size_t nscSize = Stream_GetPosition(s);
+	if ((nscSize == 0) || (nscSize > UINT32_MAX))
+		goto fail;
+
+	if (!nsc_process_message(clear->nsc, 32, nWidth, nHeight, Stream_Buffer(s),
+	                         WINPR_ASSERTING_INT_CAST(UINT32, nscSize), decoded, SrcFormat,
+	                         verifyStep, 0, 0, nWidth, nHeight, FREERDP_FLIP_NONE))
+		goto fail;
+
+	for (UINT32 y = 0; y < nHeight; y++)
+	{
+		const BYTE* srcLine = &pSrcData[(1ULL * (SrcY + y) * SrcStep) + (1ULL * SrcX * bpp)];
+		const BYTE* decodedLine = &decoded[1ULL * y * verifyStep];
+
+		for (UINT32 x = 0; x < nWidth; x++)
+		{
+			const UINT32 srcColor = FreeRDPReadColor(&srcLine[1ULL * x * bpp], SrcFormat);
+			const UINT32 decodedColor = FreeRDPReadColor(&decodedLine[1ULL * x * bpp], SrcFormat);
+			BYTE srcR = 0;
+			BYTE srcG = 0;
+			BYTE srcB = 0;
+			BYTE srcA = 0;
+			BYTE decodedR = 0;
+			BYTE decodedG = 0;
+			BYTE decodedB = 0;
+			BYTE decodedA = 0;
+
+			FreeRDPSplitColor(srcColor, SrcFormat, &srcR, &srcG, &srcB, &srcA, nullptr);
+			FreeRDPSplitColor(decodedColor, SrcFormat, &decodedR, &decodedG, &decodedB, &decodedA,
+			                  nullptr);
+
+			const UINT32 diffR = (srcR > decodedR) ? (srcR - decodedR) : (decodedR - srcR);
+			const UINT32 diffG = (srcG > decodedG) ? (srcG - decodedG) : (decodedG - srcG);
+			const UINT32 diffB = (srcB > decodedB) ? (srcB - decodedB) : (decodedB - srcB);
+			if ((diffR > clear->nscTolerance) || (diffG > clear->nscTolerance) ||
+			    (diffB > clear->nscTolerance))
+				goto fail;
+		}
+	}
+
+	if (!nsc_context_set_parameters(clear->nsc, NSC_COLOR_FORMAT, SrcFormat))
+		goto fail;
+	if (!nsc_context_set_parameters(clear->nsc, NSC_COLOR_LOSS_LEVEL, 1))
+		goto fail;
+	if (!nsc_context_set_parameters(clear->nsc, NSC_ALLOW_SUBSAMPLING, 0))
+		goto fail;
+
+	if (!clear_encode_write_uint16(dst, capacity, offset, 0))
+		goto fail;
+	if (!clear_encode_write_uint16(dst, capacity, offset, 0))
+		goto fail;
+	if (!clear_encode_write_uint16(dst, capacity, offset, WINPR_ASSERTING_INT_CAST(UINT16, nWidth)))
+		goto fail;
+	if (!clear_encode_write_uint16(dst, capacity, offset,
+	                               WINPR_ASSERTING_INT_CAST(UINT16, nHeight)))
+		goto fail;
+	if (!clear_encode_write_uint32(dst, capacity, offset,
+	                               WINPR_ASSERTING_INT_CAST(UINT32, nscSize)))
+		goto fail;
+
+	if ((*offset > capacity) || (capacity - *offset < (1ULL + nscSize)))
+		goto fail;
+
+	dst[(*offset)++] = 1; /* CLEARCODEC_SUBCODEC_NS_CODEC */
+	CopyMemory(&dst[*offset], Stream_Buffer(s), nscSize);
+	*offset += nscSize;
+	rc = TRUE;
+
+fail:
+	free(decoded);
+	free(input);
+	Stream_Free(s, TRUE);
+	return rc;
+}
+
+static UINT32 clear_encode_normalized_color(const BYTE* WINPR_RESTRICT src, UINT32 SrcFormat,
+                                            const gdiPalette* WINPR_RESTRICT palette)
+{
+	BYTE r = 0;
+	BYTE g = 0;
+	BYTE b = 0;
+
+	clear_encode_read_bgr(src, SrcFormat, palette, &r, &g, &b);
+	return FreeRDPGetColor(PIXEL_FORMAT_BGRX32, r, g, b, 0xFF);
+}
+
+static BOOL clear_encode_glyph_matches(const CLEAR_GLYPH_ENTRY* WINPR_RESTRICT entry,
+                                       const BYTE* WINPR_RESTRICT pSrcData, UINT32 SrcFormat,
+                                       UINT32 SrcStep, UINT32 SrcX, UINT32 SrcY, UINT32 nWidth,
+                                       UINT32 nHeight,
+                                       const gdiPalette* WINPR_RESTRICT palette)
+{
+	const UINT32 bpp = FreeRDPGetBytesPerPixel(SrcFormat);
+
+	if (!entry || !entry->pixels || (entry->width != nWidth) || (entry->height != nHeight) ||
+	    (entry->count != (nWidth * nHeight)))
+		return FALSE;
+
+	for (UINT32 y = 0; y < nHeight; y++)
+	{
+		const BYTE* line = &pSrcData[1ULL * (SrcY + y) * SrcStep + 1ULL * SrcX * bpp];
+
+		for (UINT32 x = 0; x < nWidth; x++)
+		{
+			const UINT32 color =
+			    clear_encode_normalized_color(&line[1ULL * x * bpp], SrcFormat, palette);
+			if (entry->pixels[1ULL * y * nWidth + x] != color)
+				return FALSE;
+		}
+	}
+
+	return TRUE;
+}
+
+static BOOL clear_encode_find_glyph(CLEAR_CONTEXT* WINPR_RESTRICT clear,
+                                    const BYTE* WINPR_RESTRICT pSrcData, UINT32 SrcFormat,
+                                    UINT32 SrcStep, UINT32 SrcX, UINT32 SrcY, UINT32 nWidth,
+                                    UINT32 nHeight, const gdiPalette* WINPR_RESTRICT palette,
+                                    UINT16* WINPR_RESTRICT glyphIndex)
+{
+	for (size_t index = 0; index < ARRAYSIZE(clear->GlyphCache); index++)
+	{
+		if (clear_encode_glyph_matches(&clear->GlyphCache[index], pSrcData, SrcFormat, SrcStep,
+		                               SrcX, SrcY, nWidth, nHeight, palette))
+		{
+			*glyphIndex = WINPR_ASSERTING_INT_CAST(UINT16, index);
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
+static BOOL clear_encode_store_glyph(CLEAR_CONTEXT* WINPR_RESTRICT clear,
+                                     const BYTE* WINPR_RESTRICT pSrcData, UINT32 SrcFormat,
+                                     UINT32 SrcStep, UINT32 SrcX, UINT32 SrcY, UINT32 nWidth,
+                                     UINT32 nHeight, const gdiPalette* WINPR_RESTRICT palette,
+                                     UINT16 glyphIndex)
+{
+	const UINT32 bpp = FreeRDPGetBytesPerPixel(SrcFormat);
+	const UINT32 count = nWidth * nHeight;
+	CLEAR_GLYPH_ENTRY* entry = &clear->GlyphCache[glyphIndex];
+
+	if (count > entry->size)
+	{
+		UINT32* tmp = winpr_aligned_recalloc(entry->pixels, count, sizeof(UINT32), 32);
+		if (!tmp)
+			return FALSE;
+
+		entry->pixels = tmp;
+		entry->size = count;
+	}
+
+	for (UINT32 y = 0; y < nHeight; y++)
+	{
+		const BYTE* line = &pSrcData[1ULL * (SrcY + y) * SrcStep + 1ULL * SrcX * bpp];
+
+		for (UINT32 x = 0; x < nWidth; x++)
+		{
+			entry->pixels[1ULL * y * nWidth + x] =
+			    clear_encode_normalized_color(&line[1ULL * x * bpp], SrcFormat, palette);
+		}
+	}
+
+	entry->count = count;
+	entry->width = nWidth;
+	entry->height = nHeight;
+	return TRUE;
+}
+
+typedef enum
+{
+	CLEAR_ENCODE_MODE_RESIDUAL = 0,
+	CLEAR_ENCODE_MODE_RAW = 1,
+	CLEAR_ENCODE_MODE_RLEX = 2,
+	CLEAR_ENCODE_MODE_NSC = 3,
+	CLEAR_ENCODE_MODE_BANDS = 4
+} CLEAR_ENCODE_MODE;
+
+typedef struct
+{
+	UINT64 pixelCount;
+	UINT64 rawSubcodecSize;
+	UINT64 maxSize;
+	BOOL glyphEligible;
+} CLEAR_ENCODE_LIMITS;
+
+static BOOL clear_encode_patch_uint32(BYTE* WINPR_RESTRICT dst, size_t offset, size_t value)
+{
+	if (!dst || (value > UINT32_MAX))
+		return FALSE;
+
+	dst[offset + 0] = WINPR_ASSERTING_INT_CAST(BYTE, value & 0xFF);
+	dst[offset + 1] = WINPR_ASSERTING_INT_CAST(BYTE, (value >> 8) & 0xFF);
+	dst[offset + 2] = WINPR_ASSERTING_INT_CAST(BYTE, (value >> 16) & 0xFF);
+	dst[offset + 3] = WINPR_ASSERTING_INT_CAST(BYTE, (value >> 24) & 0xFF);
+	return TRUE;
+}
+
+static CLEAR_ENCODE_MODE clear_encode_select_mode(
+    CLEAR_CONTEXT* WINPR_RESTRICT clear, const BYTE* WINPR_RESTRICT pSrcData, UINT32 SrcFormat,
+    UINT32 SrcStep, UINT32 SrcX, UINT32 SrcY, UINT32 nWidth, UINT32 nHeight,
+    BYTE* WINPR_RESTRICT dst, size_t capacity, size_t residualOffset, size_t residualSize,
+    UINT64 rawSubcodecSize, const gdiPalette* WINPR_RESTRICT palette)
+{
+	size_t bestSize = residualSize;
+	CLEAR_ENCODE_MODE mode = CLEAR_ENCODE_MODE_RESIDUAL;
+	BOOL rlexAvailable = FALSE;
+	size_t offset = residualOffset;
+
+	if (clear_encode_rlex_subcodec(pSrcData, SrcFormat, SrcStep, SrcX, SrcY, nWidth, nHeight, dst,
+	                               capacity, &offset, palette))
+	{
+		rlexAvailable = TRUE;
+		const size_t rlexSubcodecSize = offset - residualOffset;
+		if (rlexSubcodecSize < bestSize)
+		{
+			bestSize = rlexSubcodecSize;
+			mode = CLEAR_ENCODE_MODE_RLEX;
+		}
+	}
+
+	offset = residualOffset;
+	if (!rlexAvailable &&
+	    clear_encode_nsc_subcodec(clear, pSrcData, SrcFormat, SrcStep, SrcX, SrcY, nWidth, nHeight,
+	                              dst, capacity, &offset))
+	{
+		const size_t nscSubcodecSize = offset - residualOffset;
+		if (nscSubcodecSize < bestSize)
+		{
+			bestSize = nscSubcodecSize;
+			mode = CLEAR_ENCODE_MODE_NSC;
+		}
+	}
+
+	if (rawSubcodecSize < bestSize)
+	{
+		bestSize = WINPR_ASSERTING_INT_CAST(size_t, rawSubcodecSize);
+		mode = CLEAR_ENCODE_MODE_RAW;
+	}
+
+	size_t bandsSize = 0;
+	if ((mode != CLEAR_ENCODE_MODE_RLEX) &&
+	    clear_encode_bands_size(clear, pSrcData, SrcFormat, SrcStep, SrcX, SrcY, nWidth, nHeight,
+	                            palette, &bandsSize) &&
+	    ((bandsSize < bestSize) || (nHeight == 52) || ((nWidth == 32) && (nHeight == 1))))
+	{
+		mode = CLEAR_ENCODE_MODE_BANDS;
+	}
+
+	return mode;
+}
+
+static BOOL clear_encode_emit_payload(CLEAR_CONTEXT* WINPR_RESTRICT clear,
+                                      const BYTE* WINPR_RESTRICT pSrcData, UINT32 SrcFormat,
+                                      UINT32 SrcStep, UINT32 SrcX, UINT32 SrcY, UINT32 nWidth,
+                                      UINT32 nHeight, BYTE* WINPR_RESTRICT dst, size_t capacity,
+                                      size_t* WINPR_RESTRICT offset,
+                                      size_t residualCountOffset, size_t residualOffset,
+                                      size_t residualSize, UINT64 rawSubcodecSize,
+                                      CLEAR_ENCODE_MODE mode,
+                                      const gdiPalette* WINPR_RESTRICT palette)
+{
+	WINPR_ASSERT(offset);
+
+	switch (mode)
+	{
+		case CLEAR_ENCODE_MODE_RAW:
+			if (!clear_encode_raw_subcodec(pSrcData, SrcFormat, SrcStep, SrcX, SrcY, nWidth, nHeight,
+			                               dst, capacity, offset, palette))
+				return FALSE;
+			return clear_encode_patch_uint32(dst, residualCountOffset + 8,
+			                                 WINPR_ASSERTING_INT_CAST(size_t, rawSubcodecSize));
+
+		case CLEAR_ENCODE_MODE_RLEX:
+			if (!clear_encode_rlex_subcodec(pSrcData, SrcFormat, SrcStep, SrcX, SrcY, nWidth,
+			                                nHeight, dst, capacity, offset, palette))
+				return FALSE;
+			return clear_encode_patch_uint32(dst, residualCountOffset + 8, *offset - residualOffset);
+
+		case CLEAR_ENCODE_MODE_NSC:
+			if (!clear_encode_nsc_subcodec(clear, pSrcData, SrcFormat, SrcStep, SrcX, SrcY, nWidth,
+			                               nHeight, dst, capacity, offset))
+				return FALSE;
+			return clear_encode_patch_uint32(dst, residualCountOffset + 8, *offset - residualOffset);
+
+		case CLEAR_ENCODE_MODE_BANDS:
+			if (!clear_encode_bands(clear, pSrcData, SrcFormat, SrcStep, SrcX, SrcY, nWidth, nHeight,
+			                        dst, capacity, offset, palette))
+				return FALSE;
+			if (!clear_encode_patch_uint32(dst, residualCountOffset + 4, *offset - residualOffset))
+				return FALSE;
+			if (clear->VBarResetPending)
+				dst[0] |= CLEARCODEC_FLAG_CACHE_RESET;
+			clear->VBarResetPending = FALSE;
+			return TRUE;
+
+		case CLEAR_ENCODE_MODE_RESIDUAL:
+		default:
+			if (!clear_encode_residual(clear, pSrcData, SrcFormat, SrcStep, SrcX, SrcY, nWidth,
+			                           nHeight, dst, capacity, offset, palette))
+				return FALSE;
+			return clear_encode_patch_uint32(dst, residualCountOffset, residualSize);
+	}
+}
+
+static BOOL clear_encode_validate_input(CLEAR_CONTEXT* WINPR_RESTRICT clear,
+                                        const BYTE* WINPR_RESTRICT pSrcData, UINT32 SrcFormat,
+                                        UINT32 SrcStep, UINT32 SrcX, UINT32 SrcY, UINT32 nWidth,
+                                        UINT32 nHeight)
+{
+	if (!clear || !clear->Compressor || !pSrcData || (nWidth == 0) || (nHeight == 0) ||
+	    (nWidth > UINT16_MAX) || (nHeight > UINT16_MAX))
+		return FALSE;
+
+	const UINT32 bpp = FreeRDPGetBytesPerPixel(SrcFormat);
+	if (bpp == 0)
+		return FALSE;
+
+	if ((SrcX > (UINT32_MAX / bpp)) || (nWidth > ((UINT32_MAX / bpp) - SrcX)))
+		return FALSE;
+	if (SrcY > (UINT32_MAX - nHeight))
+		return FALSE;
+
+	const UINT32 minStep = (SrcX + nWidth) * bpp;
+	return SrcStep >= minStep;
+}
+
+static BOOL clear_encode_calculate_limits(UINT32 nWidth, UINT32 nHeight,
+                                          CLEAR_ENCODE_LIMITS* WINPR_RESTRICT limits)
+{
+	WINPR_ASSERT(limits);
+
+	limits->pixelCount = 1ULL * nWidth * nHeight;
+	const UINT64 maxResidualSize = limits->pixelCount * 10ULL;
+	limits->rawSubcodecSize = 13ULL + limits->pixelCount * 3ULL;
+	const UINT64 maxBandsSize =
+	    (nHeight <= 52) ? (11ULL + nWidth * (2ULL + nHeight * 3ULL)) : 0ULL;
+	const UINT64 maxPayloadSize = MAX(MAX(maxResidualSize, limits->rawSubcodecSize), maxBandsSize);
+	limits->glyphEligible = limits->pixelCount <= 1024ULL;
+	const UINT64 glyphHeaderSize = limits->glyphEligible ? 2ULL : 0ULL;
+	limits->maxSize = 2ULL + glyphHeaderSize + 12ULL + maxPayloadSize;
+
+	return (limits->pixelCount <= UINT32_MAX) && (limits->rawSubcodecSize <= UINT32_MAX) &&
+	       (limits->maxSize <= UINT32_MAX);
+}
+
+static BOOL clear_encode_emit_glyph_hit(CLEAR_CONTEXT* WINPR_RESTRICT clear, UINT16 glyphIndex,
+                                        BYTE** WINPR_RESTRICT ppDstData,
+                                        UINT32* WINPR_RESTRICT pDstSize)
+{
+	WINPR_ASSERT(clear);
+	WINPR_ASSERT(ppDstData);
+	WINPR_ASSERT(pDstSize);
+
+	BYTE* dst = calloc(1, 4);
+	if (!dst)
+		return FALSE;
+
+	dst[0] = CLEARCODEC_FLAG_GLYPH_INDEX | CLEARCODEC_FLAG_GLYPH_HIT;
+	dst[1] = WINPR_ASSERTING_INT_CAST(BYTE, clear->seqNumber & 0xFF);
+	dst[2] = WINPR_ASSERTING_INT_CAST(BYTE, glyphIndex & 0xFF);
+	dst[3] = WINPR_ASSERTING_INT_CAST(BYTE, (glyphIndex >> 8) & 0xFF);
+
+	*ppDstData = dst;
+	*pDstSize = 4;
+	clear->seqNumber = (clear->seqNumber + 1) & 0xFF;
+	return TRUE;
+}
+
+static void clear_encode_init_stream_header(CLEAR_CONTEXT* WINPR_RESTRICT clear,
+                                            BYTE* WINPR_RESTRICT dst, BOOL glyphEligible,
+                                            UINT16 glyphIndex, size_t* WINPR_RESTRICT offset,
+                                            size_t* WINPR_RESTRICT residualCountOffset)
+{
+	WINPR_ASSERT(clear);
+	WINPR_ASSERT(dst);
+	WINPR_ASSERT(offset);
+	WINPR_ASSERT(residualCountOffset);
+
+	dst[(*offset)++] = glyphEligible ? CLEARCODEC_FLAG_GLYPH_INDEX : 0; /* flags */
+	dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, clear->seqNumber & 0xFF);
+	if (glyphEligible)
+	{
+		dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, glyphIndex & 0xFF);
+		dst[(*offset)++] = WINPR_ASSERTING_INT_CAST(BYTE, (glyphIndex >> 8) & 0xFF);
+	}
+
+	*residualCountOffset = *offset;
+	*offset += 12;
+}
+
+static BOOL clear_encode_store_glyph_if_needed(
+    CLEAR_CONTEXT* WINPR_RESTRICT clear, const BYTE* WINPR_RESTRICT pSrcData, UINT32 SrcFormat,
+    UINT32 SrcStep, UINT32 SrcX, UINT32 SrcY, UINT32 nWidth, UINT32 nHeight,
+    const gdiPalette* WINPR_RESTRICT palette, BOOL glyphEligible, UINT16 glyphIndex)
+{
+	if (!glyphEligible)
+		return TRUE;
+
+	if (!clear_encode_store_glyph(clear, pSrcData, SrcFormat, SrcStep, SrcX, SrcY, nWidth, nHeight,
+	                              palette, glyphIndex))
+		return FALSE;
+
+	clear->GlyphCacheCursor =
+	    (clear->GlyphCacheCursor + 1) % WINPR_ASSERTING_INT_CAST(UINT32, ARRAYSIZE(clear->GlyphCache));
+	return TRUE;
+}
+
+INT32 clear_encode(CLEAR_CONTEXT* WINPR_RESTRICT clear, const BYTE* WINPR_RESTRICT pSrcData,
+                   UINT32 SrcFormat, UINT32 SrcStep, UINT32 SrcX, UINT32 SrcY, UINT32 nWidth,
+                   UINT32 nHeight, BYTE** WINPR_RESTRICT ppDstData,
+                   UINT32* WINPR_RESTRICT pDstSize,
+                   const gdiPalette* WINPR_RESTRICT palette)
+{
+	if (ppDstData)
+		*ppDstData = nullptr;
+	if (pDstSize)
+		*pDstSize = 0;
+
+	if (!ppDstData || !pDstSize ||
+	    !clear_encode_validate_input(clear, pSrcData, SrcFormat, SrcStep, SrcX, SrcY, nWidth,
+	                                 nHeight))
+		return -1;
+
+	CLEAR_ENCODE_LIMITS limits = { 0 };
+	if (!clear_encode_calculate_limits(nWidth, nHeight, &limits))
+		return -1;
+
+	UINT16 glyphIndex = 0;
+
+	if (limits.glyphEligible &&
+	    clear_encode_find_glyph(clear, pSrcData, SrcFormat, SrcStep, SrcX, SrcY, nWidth, nHeight,
+	                            palette, &glyphIndex))
+	{
+		return clear_encode_emit_glyph_hit(clear, glyphIndex, ppDstData, pDstSize) ? 0 : -1;
+	}
+
+	if (limits.glyphEligible)
+	{
+		glyphIndex =
+		    WINPR_ASSERTING_INT_CAST(UINT16, clear->GlyphCacheCursor % ARRAYSIZE(clear->GlyphCache));
+	}
+
+	BYTE* dst = calloc(1, WINPR_ASSERTING_INT_CAST(size_t, limits.maxSize));
+	if (!dst)
+		return -1;
+
+	size_t offset = 0;
+	size_t residualCountOffset = 0;
+	clear_encode_init_stream_header(clear, dst, limits.glyphEligible, glyphIndex, &offset,
+	                                &residualCountOffset);
+
+	const size_t residualOffset = offset;
+	if (!clear_encode_residual(clear, pSrcData, SrcFormat, SrcStep, SrcX, SrcY, nWidth, nHeight,
+	                           dst, WINPR_ASSERTING_INT_CAST(size_t, limits.maxSize), &offset,
+	                           palette))
+	{
+		free(dst);
+		return -1;
+	}
+
+	const size_t residualSize = offset - residualOffset;
+	if (residualSize > UINT32_MAX)
+	{
+		free(dst);
+		return -1;
+	}
+
+	const CLEAR_ENCODE_MODE mode = clear_encode_select_mode(
+	    clear, pSrcData, SrcFormat, SrcStep, SrcX, SrcY, nWidth, nHeight, dst,
+	    WINPR_ASSERTING_INT_CAST(size_t, limits.maxSize), residualOffset, residualSize,
+	    limits.rawSubcodecSize, palette);
+
+	ZeroMemory(&dst[residualCountOffset], 12);
+	offset = residualOffset;
+
+	if (!clear_encode_emit_payload(clear, pSrcData, SrcFormat, SrcStep, SrcX, SrcY, nWidth, nHeight,
+	                               dst, WINPR_ASSERTING_INT_CAST(size_t, limits.maxSize), &offset,
+	                               residualCountOffset, residualOffset, residualSize,
+	                               limits.rawSubcodecSize, mode, palette))
+	{
+		free(dst);
+		return -1;
+	}
+
+	BYTE* trimmed = realloc(dst, offset);
+	if (trimmed)
+		dst = trimmed;
+
+	if (!clear_encode_store_glyph_if_needed(clear, pSrcData, SrcFormat, SrcStep, SrcX, SrcY, nWidth,
+	                                        nHeight, palette, limits.glyphEligible, glyphIndex))
+	{
+		free(dst);
+		return -1;
+	}
+
+	*ppDstData = dst;
+	*pDstSize = WINPR_ASSERTING_INT_CAST(UINT32, offset);
+	clear->seqNumber = (clear->seqNumber + 1) & 0xFF;
+	return 0;
+}
+
 BOOL clear_context_reset(CLEAR_CONTEXT* WINPR_RESTRICT clear)
 {
 	if (!clear)
@@ -1291,6 +2519,20 @@ BOOL clear_context_reset(CLEAR_CONTEXT* WINPR_RESTRICT clear)
 	 * and its internal caches must NOT be reset on the ResetGraphics PDU.
 	 */
 	clear->seqNumber = 0;
+	if (clear->Compressor)
+	{
+		clear_reset_vbar_storage(clear, TRUE);
+		clear->VBarResetPending = TRUE;
+	}
+	return TRUE;
+}
+
+BOOL clear_context_set_encoder_nsc_tolerance(CLEAR_CONTEXT* WINPR_RESTRICT clear, UINT32 tolerance)
+{
+	if (!clear || !clear->Compressor)
+		return FALSE;
+
+	clear->nscTolerance = tolerance;
 	return TRUE;
 }
 
@@ -1318,6 +2560,7 @@ CLEAR_CONTEXT* clear_context_new(BOOL Compressor)
 
 	if (!clear_context_reset(clear))
 		goto error_nsc;
+	clear->VBarResetPending = FALSE;
 
 	return clear;
 error_nsc:
