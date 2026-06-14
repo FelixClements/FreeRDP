@@ -110,9 +110,6 @@ BOOL freerdp_settings_get_bool(WINPR_ATTR_UNUSED const rdpSettings* settings,
 		case FreeRDP_AutoReconnectionEnabled:
 			return settings->AutoReconnectionEnabled;
 
-		case FreeRDP_SessionHasBeenReconnected:
-			return settings->SessionHasBeenReconnected;
-
 		case FreeRDP_AutoReconnectionPacketSupported:
 			return settings->AutoReconnectionPacketSupported;
 
@@ -521,6 +518,9 @@ BOOL freerdp_settings_get_bool(WINPR_ATTR_UNUSED const rdpSettings* settings,
 		case FreeRDP_ServerMode:
 			return settings->ServerMode;
 
+		case FreeRDP_SessionHasBeenReconnected:
+			return settings->SessionHasBeenReconnected;
+
 		case FreeRDP_SmartSizing:
 			return settings->SmartSizing;
 
@@ -742,10 +742,6 @@ BOOL freerdp_settings_set_bool(WINPR_ATTR_UNUSED rdpSettings* settings,
 
 		case FreeRDP_AutoReconnectionEnabled:
 			settings->AutoReconnectionEnabled = cnv.c;
-			break;
-
-		case FreeRDP_SessionHasBeenReconnected:
-			settings->SessionHasBeenReconnected = cnv.c;
 			break;
 
 		case FreeRDP_AutoReconnectionPacketSupported:
@@ -1290,6 +1286,10 @@ BOOL freerdp_settings_set_bool(WINPR_ATTR_UNUSED rdpSettings* settings,
 
 		case FreeRDP_ServerMode:
 			settings->ServerMode = cnv.c;
+			break;
+
+		case FreeRDP_SessionHasBeenReconnected:
+			settings->SessionHasBeenReconnected = cnv.c;
 			break;
 
 		case FreeRDP_SmartSizing:
@@ -2814,6 +2814,9 @@ const char* freerdp_settings_get_string(WINPR_ATTR_UNUSED const rdpSettings* set
 		case FreeRDP_ContainerName:
 			return settings->ContainerName;
 
+		case FreeRDP_CorrelationId:
+			return settings->CorrelationId;
+
 		case FreeRDP_CspName:
 			return settings->CspName;
 
@@ -3038,6 +3041,9 @@ const char* freerdp_settings_get_string(WINPR_ATTR_UNUSED const rdpSettings* set
 
 		case FreeRDP_SmartcardPrivateKey:
 			return settings->SmartcardPrivateKey;
+
+		case FreeRDP_SspiClientHostname:
+			return settings->SspiClientHostname;
 
 		case FreeRDP_SspiModule:
 			return settings->SspiModule;
@@ -3146,6 +3152,9 @@ char* freerdp_settings_get_string_writable(rdpSettings* settings, FreeRDP_Settin
 		case FreeRDP_ContainerName:
 			return settings->ContainerName;
 
+		case FreeRDP_CorrelationId:
+			return settings->CorrelationId;
+
 		case FreeRDP_CspName:
 			return settings->CspName;
 
@@ -3370,6 +3379,9 @@ char* freerdp_settings_get_string_writable(rdpSettings* settings, FreeRDP_Settin
 
 		case FreeRDP_SmartcardPrivateKey:
 			return settings->SmartcardPrivateKey;
+
+		case FreeRDP_SspiClientHostname:
+			return settings->SspiClientHostname;
 
 		case FreeRDP_SspiModule:
 			return settings->SspiModule;
@@ -3488,6 +3500,9 @@ BOOL freerdp_settings_set_string_(WINPR_ATTR_UNUSED rdpSettings* settings,
 
 		case FreeRDP_ContainerName:
 			return update_string_(&settings->ContainerName, cnv.c, len);
+
+		case FreeRDP_CorrelationId:
+			return update_string_(&settings->CorrelationId, cnv.c, len);
 
 		case FreeRDP_CspName:
 			return update_string_(&settings->CspName, cnv.c, len);
@@ -3714,6 +3729,9 @@ BOOL freerdp_settings_set_string_(WINPR_ATTR_UNUSED rdpSettings* settings,
 		case FreeRDP_SmartcardPrivateKey:
 			return update_string_(&settings->SmartcardPrivateKey, cnv.c, len);
 
+		case FreeRDP_SspiClientHostname:
+			return update_string_(&settings->SspiClientHostname, cnv.c, len);
+
 		case FreeRDP_SspiModule:
 			return update_string_(&settings->SspiModule, cnv.c, len);
 
@@ -3847,6 +3865,9 @@ BOOL freerdp_settings_set_string_copy_(WINPR_ATTR_UNUSED rdpSettings* settings,
 
 		case FreeRDP_ContainerName:
 			return update_string_copy_(&settings->ContainerName, cnv.cc, len, cleanup);
+
+		case FreeRDP_CorrelationId:
+			return update_string_copy_(&settings->CorrelationId, cnv.cc, len, cleanup);
 
 		case FreeRDP_CspName:
 			return update_string_copy_(&settings->CspName, cnv.cc, len, cleanup);
@@ -4078,6 +4099,9 @@ BOOL freerdp_settings_set_string_copy_(WINPR_ATTR_UNUSED rdpSettings* settings,
 
 		case FreeRDP_SmartcardPrivateKey:
 			return update_string_copy_(&settings->SmartcardPrivateKey, cnv.cc, len, cleanup);
+
+		case FreeRDP_SspiClientHostname:
+			return update_string_copy_(&settings->SspiClientHostname, cnv.cc, len, cleanup);
 
 		case FreeRDP_SspiModule:
 			return update_string_copy_(&settings->SspiModule, cnv.cc, len, cleanup);

@@ -47,6 +47,13 @@ static UINT32 update_glyph_offset(const BYTE* data, size_t length, UINT32 index,
 {
 	if ((ulCharInc == 0) && (!(flAccel & SO_CHAR_INC_EQUAL_BM_BASE)))
 	{
+		if (index >= length)
+		{
+			WLog_WARN(TAG, "glyph offset index out of bound %" PRIu32 " [max %" PRIuz "]", index,
+			          length);
+			return index;
+		}
+
 		UINT32 offset = data[index++];
 
 		if (offset & 0x80)
@@ -565,7 +572,7 @@ rdpGlyph* glyph_cache_get(rdpGlyphCache* glyphCache, UINT32 id, UINT32 index)
 	}
 
 	GLYPH_CACHE* cache = &glyphCache->glyphCache[id];
-	if (index > cache->number)
+	if (index >= cache->number)
 	{
 		WLog_ERR(TAG, "index %" PRIu32 " out of range for cache id: %" PRIu32 "", index, id);
 		return nullptr;

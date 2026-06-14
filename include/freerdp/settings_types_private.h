@@ -78,7 +78,10 @@ struct rdp_settings
 	SETTINGS_DEPRECATED(ALIGN64 char* AadServerHostname);       /** 30
 		                                                         * @since version 3.1.0
 		                                                         */
-	UINT64 padding0064[64 - 31];                                /* 31 */
+	SETTINGS_DEPRECATED(ALIGN64 char* CorrelationId);           /** 31
+		                                                         * @since version 3.27.0
+		                                                         */
+	UINT64 padding0064[64 - 32];                                /* 32 */
 	/* resource management related options */
 	SETTINGS_DEPRECATED(ALIGN64 UINT32 ThreadingFlags); /* 64 */
 
@@ -118,7 +121,12 @@ struct rdp_settings
 	SETTINGS_DEPRECATED(ALIGN64 UINT64 MonitorOverrideFlags);  /** 154
 		                                                        * @since version 3.15.0
 		                                                        */
-	UINT64 padding0192[192 - 155];                             /* 155 */
+	SETTINGS_DEPRECATED(ALIGN64 char* SspiClientHostname);     /** 155
+		                                                        * @brief The client name sent during
+		                                                        * SSPI authentication if available
+		                                                        * @since version 3.27.0
+		                                                        */
+	UINT64 padding0192[192 - 156];                             /* 156 */
 
 	/* Client/Server Security Data */
 	SETTINGS_DEPRECATED(ALIGN64 BOOL UseRdpSecurityLayer);                /* 192 */
