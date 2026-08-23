@@ -665,11 +665,11 @@ static SECURITY_STATUS negotiate_mic_exchange(NEGOTIATE_CONTEXT* context, NegTok
 	}
 
 	/* When using NTLM cipher states need to be reset after mic exchange */
-	const TCHAR* name = sspi_SecureHandleGetUpperPointer(&context->sub_context);
-	if (!name)
+	const SSPI_PACKAGE_ID sub_id = sspi_SecureHandleGetPackageId(&context->sub_context);
+	if (!sub_id)
 		return SEC_E_INTERNAL_ERROR;
 
-	if (_tcsncmp(name, NTLM_SSP_NAME, ARRAYSIZE(NTLM_SSP_NAME)) == 0)
+	if (sub_id == SSPI_PACKAGE_NTLM)
 	{
 		if (!ntlm_reset_cipher_state(&context->sub_context))
 			return SEC_E_INTERNAL_ERROR;
@@ -810,7 +810,7 @@ static SECURITY_STATUS SEC_ENTRY negotiate_InitializeSecurityContextW(
 			return SEC_E_INSUFFICIENT_MEMORY;
 		}
 
-		sspi_SecureHandleSetUpperPointer(phNewContext, NEGO_SSP_NAME);
+		sspi_SecureHandleSetPackageId(phNewContext, SSPI_PACKAGE_NEGOTIATE);
 		sspi_SecureHandleSetLowerPointer(phNewContext, context);
 
 		if (!context->spnego)
@@ -1126,6 +1126,12 @@ static SECURITY_STATUS SEC_ENTRY negotiate_AcceptSecurityContext(
 			if (!init_context.spnego)
 				return status;
 
+			/* Clean up any partially created sub context before falling back to
+			 * another mechanism (mirrors the mech change handling in
+			 * negotiate_InitializeSecurityContextW) */
+			if (init_context.mech)
+				init_context.mech->pkg->table->DeleteSecurityContext(&init_context.sub_context);
+
 			init_context.mic = TRUE;
 			first_mech = init_context.mech;
 			init_context.mech = nullptr;
@@ -1160,7 +1166,7 @@ static SECURITY_STATUS SEC_ENTRY negotiate_AcceptSecurityContext(
 			return SEC_E_INSUFFICIENT_MEMORY;
 		}
 
-		sspi_SecureHandleSetUpperPointer(phNewContext, NEGO_SSP_NAME);
+		sspi_SecureHandleSetPackageId(phNewContext, SSPI_PACKAGE_NEGOTIATE);
 		sspi_SecureHandleSetLowerPointer(phNewContext, context);
 
 		if (!init_context.spnego)
@@ -1213,8 +1219,15 @@ static SECURITY_STATUS SEC_ENTRY negotiate_AcceptSecurityContext(
 			if (output_buffer)
 				CopyMemory(&output_token.mechToken, output_buffer, sizeof(SecBuffer));
 
+			/* If the client's optimistic mechanism was not accepted the sub
+			 * context was never created (or was cleaned up); pass NULL so the
+			 * selected mechanism creates a fresh context instead of rejecting
+			 * the empty handle with SEC_E_INVALID_HANDLE */
+			PCtxtHandle sub_context = sspi_SecureHandleGetLowerPointer(&context->sub_context)
+			                              ? &context->sub_context
+			                              : nullptr;
 			status = context->mech->pkg->table->AcceptSecurityContext(
-			    sub_cred, &context->sub_context, &mech_input, fContextReq | context->mech->flags,
+			    sub_cred, sub_context, &mech_input, fContextReq | context->mech->flags,
 			    TargetDataRep, &context->sub_context, &mech_output, pfContextAttr, ptsTimeStamp);
 
 			if (IsSecurityStatusError(status))
@@ -1528,7 +1541,7 @@ static SECURITY_STATUS SEC_ENTRY negotiate_AcquireCredentialsHandleW(
 	}
 
 	sspi_SecureHandleSetLowerPointer(phCredential, (void*)creds);
-	sspi_SecureHandleSetUpperPointer(phCredential, (void*)NEGO_SSP_NAME);
+	sspi_SecureHandleSetPackageId(phCredential, SSPI_PACKAGE_NEGOTIATE);
 	return SEC_E_OK;
 }
 
@@ -1567,7 +1580,7 @@ static SECURITY_STATUS SEC_ENTRY negotiate_AcquireCredentialsHandleA(
 	}
 
 	sspi_SecureHandleSetLowerPointer(phCredential, (void*)creds);
-	sspi_SecureHandleSetUpperPointer(phCredential, (void*)NEGO_SSP_NAME);
+	sspi_SecureHandleSetPackageId(phCredential, SSPI_PACKAGE_NEGOTIATE);
 	return SEC_E_OK;
 }
 

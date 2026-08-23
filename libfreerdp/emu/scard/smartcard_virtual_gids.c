@@ -714,7 +714,7 @@ static BOOL vgids_ins_select(vgidsContext* context, wStream* s, BYTE** response,
 
 			/* Check if we select MS GIDS App (only one we know) */
 			Stream_Read(s, aid, lc);
-			if (memcmp(aid, g_MsGidsAID, lc) != 0)
+			if ((lc > sizeof(g_MsGidsAID)) || (memcmp(aid, g_MsGidsAID, lc) != 0))
 			{
 				status = ISO_STATUS_FILENOTFOUND;
 				break;
@@ -751,9 +751,9 @@ static BOOL vgids_ins_select(vgidsContext* context, wStream* s, BYTE** response,
 		{
 			/* read FID from APDU */
 			UINT16 fid = 0;
-			if (lc > 2)
+			if (lc != 2)
 			{
-				WLog_ERR(TAG, "The LC byte for the file ID is greater than 2");
+				WLog_ERR(TAG, "The LC byte for the file ID must be 2");
 				status = ISO_STATUS_INVALIDLC;
 				break;
 			}

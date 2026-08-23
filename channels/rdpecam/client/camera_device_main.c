@@ -95,12 +95,21 @@ static BOOL ecam_dev_read_media_type(wStream* s, CAM_MEDIA_TYPE_DESCRIPTION* med
 		return FALSE;
 
 	mediaType->Format = WINPR_ASSERTING_INT_CAST(CAM_MEDIA_FORMAT, format);
-	Stream_Read_UINT32(s, mediaType->Width);
-	Stream_Read_UINT32(s, mediaType->Height);
-	Stream_Read_UINT32(s, mediaType->FrameRateNumerator);
-	Stream_Read_UINT32(s, mediaType->FrameRateDenominator);
-	Stream_Read_UINT32(s, mediaType->PixelAspectRatioNumerator);
-	Stream_Read_UINT32(s, mediaType->PixelAspectRatioDenominator);
+	mediaType->Width = Stream_Get_UINT32(s);
+	mediaType->Height = Stream_Get_UINT32(s);
+	mediaType->FrameRateNumerator = Stream_Get_UINT32(s);
+	mediaType->FrameRateDenominator = Stream_Get_UINT32(s);
+	mediaType->PixelAspectRatioNumerator = Stream_Get_UINT32(s);
+	mediaType->PixelAspectRatioDenominator = Stream_Get_UINT32(s);
+
+	if (mediaType->FrameRateNumerator == 0)
+		return FALSE;
+	if (mediaType->FrameRateDenominator == 0)
+		return FALSE;
+	if (mediaType->PixelAspectRatioNumerator == 0)
+		return FALSE;
+	if (mediaType->PixelAspectRatioDenominator == 0)
+		return FALSE;
 
 	const uint8_t flags = Stream_Get_UINT8(s);
 	if (!rdpecam_valid_MediaTypeDescriptionFlags(flags))
@@ -741,7 +750,7 @@ static UINT ecam_dev_on_data_received(IWTSVirtualChannelCallback* pChannelCallba
 	if (!dev)
 		return ERROR_INTERNAL_ERROR;
 
-	if (!Stream_CheckAndLogRequiredCapacity(TAG, data, CAM_HEADER_SIZE))
+	if (!Stream_CheckAndLogRequiredLength(TAG, data, CAM_HEADER_SIZE))
 		return ERROR_NO_DATA;
 
 	Stream_Read_UINT8(data, version);

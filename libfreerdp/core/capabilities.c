@@ -2816,10 +2816,20 @@ static BOOL rdp_write_multifragment_update_capability_set(wLog* log, wStream* s,
 		 */
 		const UINT32 tileNumX = (settings->DesktopWidth + 63) / 64;
 		const UINT32 tileNumY = (settings->DesktopHeight + 63) / 64;
+		const UINT32 limit = UINT32_MAX / 16384u;
 
-		WINPR_ASSERT(tileNumX < UINT32_MAX / tileNumY);
-		WINPR_ASSERT(tileNumY < UINT32_MAX / tileNumX);
-		WINPR_ASSERT(tileNumX * tileNumY < UINT32_MAX / 16384u);
+		if (tileNumX >= limit / tileNumY)
+		{
+			WLog_Print(log, WLOG_ERROR,
+			           "(DesktopWidth * DesktopHeigth) / 64 exceed limit of %" PRIu32, limit);
+			return FALSE;
+		}
+		if (tileNumY >= limit / tileNumX)
+		{
+			WLog_Print(log, WLOG_ERROR,
+			           "(DesktopWidth * DesktopHeigth) / 64 exceed limit of %" PRIu32, limit);
+			return FALSE;
+		}
 
 		/* and add room for headers, regions, frame markers, etc. */
 		const UINT32 MultifragMaxRequestSize = (tileNumX * tileNumY + 1u) * 16384u;
@@ -3293,7 +3303,7 @@ static BOOL rdp_read_codec_ts_rfx_capset(wLog* log, wStream* s, rdpSettings* set
 	if (blockLen < 6ull)
 	{
 		WLog_Print(log, WLOG_ERROR,
-		           "[MS_RDPRFX] 2.2.1.1.1.1 TS_RFX_CAPSET::blockLen[%" PRIu16 "] < 6", blockLen);
+		           "[MS_RDPRFX] 2.2.1.1.1.1 TS_RFX_CAPSET::blockLen[%" PRIu32 "] < 6", blockLen);
 		return FALSE;
 	}
 	if (!Stream_CheckAndLogRequiredLengthWLog(log, s, blockLen - 6ull))

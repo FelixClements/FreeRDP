@@ -253,8 +253,10 @@ static void settings_client_load_hkey_local_machine(rdpSettings* settings)
 					(void)_sntprintf(numentries, ARRAYSIZE(numentries), _T("Cell%uNumEntries"), x);
 					(void)_sntprintf(persist, ARRAYSIZE(persist), _T("Cell%uPersistent"), x);
 					if (!settings_reg_query_dword_val(hKey, numentries, &val) ||
-					    !settings_reg_query_bool_val(hKey, persist, &cache.persistent) ||
-					    !freerdp_settings_set_pointer_array(settings, FreeRDP_BitmapCacheV2CellInfo,
+					    !settings_reg_query_bool_val(hKey, persist, &cache.persistent))
+						continue;
+
+					if (!freerdp_settings_set_pointer_array(settings, FreeRDP_BitmapCacheV2CellInfo,
 					                                        x, &cache))
 						WLog_WARN(TAG, "Failed to load registry keys to settings!");
 					cache.numEntries = val;
@@ -929,6 +931,15 @@ rdpSettings* freerdp_settings_new(DWORD flags)
 	if (!freerdp_settings_set_uint16(settings, FreeRDP_SupportedColorDepths,
 	                                 RNS_UD_32BPP_SUPPORT | RNS_UD_24BPP_SUPPORT |
 	                                     RNS_UD_16BPP_SUPPORT | RNS_UD_15BPP_SUPPORT))
+		goto out_fail;
+
+	const UINT32 railflags = TS_RAIL_CLIENTSTATUS_ALLOWLOCALMOVESIZE |
+	                         TS_RAIL_CLIENTSTATUS_ZORDER_SYNC |
+	                         TS_RAIL_CLIENTSTATUS_WINDOW_RESIZE_MARGIN_SUPPORTED |
+	                         TS_RAIL_CLIENTSTATUS_APPBAR_REMOTING_SUPPORTED |
+	                         TS_RAIL_CLIENTSTATUS_POWER_DISPLAY_REQUEST_SUPPORTED |
+	                         TS_RAIL_CLIENTSTATUS_BIDIRECTIONAL_CLOAK_SUPPORTED;
+	if (!freerdp_settings_set_uint32(settings, FreeRDP_RemoteAppFeatureFlags, railflags))
 		goto out_fail;
 
 	if (!freerdp_settings_set_bool(settings, FreeRDP_UnicodeInput, TRUE) ||

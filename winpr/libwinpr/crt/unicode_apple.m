@@ -36,6 +36,12 @@
 #define MIN(a, b) (a) < (b) ? (a) : (b)
 #endif
 
+#if __has_feature(objc_arc)
+#define COND_AUTORELEASE(x) x
+#else
+#define COND_AUTORELEASE(x) [x autorelease]
+#endif
+
 #include "../log.h"
 #define TAG WINPR_TAG("unicode")
 
@@ -57,9 +63,9 @@ int int_MultiByteToWideChar(UINT CodePage, DWORD dwFlags, LPCSTR lpMultiByteStr,
 		cbMultiByte = (int)len + 1;
 	}
 
-	NSString *utf = [[NSString alloc] initWithBytes:lpMultiByteStr
-	                                         length:cbMultiByte
-	                                       encoding:NSUTF8StringEncoding];
+	NSString *utf = COND_AUTORELEASE([[NSString alloc] initWithBytes:lpMultiByteStr
+	                                                          length:cbMultiByte
+	                                                        encoding:NSUTF8StringEncoding]);
 	if (!utf)
 	{
 		WLog_WARN(TAG, "[NSString alloc] NSUTF8StringEncoding failed [%d] '%s'", cbMultiByte,
@@ -78,7 +84,7 @@ int int_MultiByteToWideChar(UINT CodePage, DWORD dwFlags, LPCSTR lpMultiByteStr,
 	}
 
 	if (cchWideChar == 0)
-		return utf16CharLen;
+		return WINPR_ASSERTING_INT_CAST(int, utf16CharLen);
 	else if (cchWideChar < utf16CharLen)
 	{
 		SetLastError(ERROR_INSUFFICIENT_BUFFER);
@@ -92,7 +98,7 @@ int int_MultiByteToWideChar(UINT CodePage, DWORD dwFlags, LPCSTR lpMultiByteStr,
 		if ((len < (size_t)cchWideChar) &&
 		    ((len == 0) || ((len > 0) && (lpWideCharStr[len - 1] != '\0'))))
 			lpWideCharStr[len] = '\0';
-		return utf16CharLen;
+		return WINPR_ASSERTING_INT_CAST(int, utf16CharLen);
 	}
 }
 
@@ -115,7 +121,8 @@ int int_WideCharToMultiByte(UINT CodePage, DWORD dwFlags, LPCWSTR lpWideCharStr,
 		cchWideChar = (int)len + 1;
 	}
 
-	NSString *utf = [[NSString alloc] initWithCharacters:lpWideCharStr length:cchWideChar];
+	NSString *utf = COND_AUTORELEASE([[NSString alloc] initWithCharacters:lpWideCharStr
+	                                                               length:cchWideChar]);
 	if (!utf)
 	{
 		WLog_WARN(TAG, "[NSString alloc] initWithCharacters failed [%d] 'XXX'", cchWideChar);
@@ -131,7 +138,7 @@ int int_WideCharToMultiByte(UINT CodePage, DWORD dwFlags, LPCWSTR lpWideCharStr,
 	}
 
 	if (cbMultiByte == 0)
-		return utf8Len;
+		return WINPR_ASSERTING_INT_CAST(int, utf8Len);
 	else if (cbMultiByte < utf8Len)
 	{
 		SetLastError(ERROR_INSUFFICIENT_BUFFER);
@@ -144,6 +151,6 @@ int int_WideCharToMultiByte(UINT CodePage, DWORD dwFlags, LPCWSTR lpWideCharStr,
 		memcpy(lpMultiByteStr, utf8, len * sizeof(char));
 		if ((len < (size_t)cbMultiByte) && (len > 0) && (lpMultiByteStr[len - 1] != '\0'))
 			lpMultiByteStr[len] = '\0';
-		return utf8Len;
+		return WINPR_ASSERTING_INT_CAST(int, utf8Len);
 	}
 }

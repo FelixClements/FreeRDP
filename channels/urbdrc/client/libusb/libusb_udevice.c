@@ -75,6 +75,8 @@ typedef struct
 	UINT32 ErrorCount;
 	IUDEVICE* idev;
 	UINT32 OutputBufferSize;
+	/* Completion framing depends on the outer RDPEUSB request direction. */
+	int transferDir;
 	GENERIC_CHANNEL_CALLBACK* callback;
 	t_isoch_transfer_cb cb;
 	wArrayList* queue;
@@ -202,11 +204,10 @@ const char* usb_interface_class_to_string(uint8_t c_class)
 	}
 }
 
-static ASYNC_TRANSFER_USER_DATA* async_transfer_user_data_new(IUDEVICE* idev, UINT32 MessageId,
-                                                              size_t offset, size_t BufferSize,
-                                                              const BYTE* data, size_t packetSize,
-                                                              BOOL NoAck, t_isoch_transfer_cb cb,
-                                                              GENERIC_CHANNEL_CALLBACK* callback)
+static ASYNC_TRANSFER_USER_DATA*
+async_transfer_user_data_new(IUDEVICE* idev, UINT32 MessageId, size_t offset, size_t BufferSize,
+                             const BYTE* data, size_t packetSize, BOOL NoAck, int transferDir,
+                             t_isoch_transfer_cb cb, GENERIC_CHANNEL_CALLBACK* callback)
 {
 	ASYNC_TRANSFER_USER_DATA* user_data = nullptr;
 	UDEVICE* pdev = (UDEVICE*)idev;
@@ -229,10 +230,9 @@ static ASYNC_TRANSFER_USER_DATA* async_transfer_user_data_new(IUDEVICE* idev, UI
 	Stream_Seek(user_data->data, offset); /* Skip header offset */
 	if (data)
 		memcpy(Stream_Pointer(user_data->data), data, BufferSize);
-	else
-		user_data->OutputBufferSize = (UINT32)BufferSize;
 
 	user_data->noack = NoAck;
+	user_data->transferDir = transferDir;
 	user_data->cb = cb;
 	user_data->callback = callback;
 	user_data->idev = idev;
@@ -291,6 +291,7 @@ static void LIBUSB_CALL func_iso_callback(struct libusb_transfer* transfer)
 					index += act_len;
 				}
 			}
+			user_data->OutputBufferSize = index;
 		}
 			/* fallthrough */
 			WINPR_FALLTHROUGH
@@ -314,7 +315,7 @@ static void LIBUSB_CALL func_iso_callback(struct libusb_transfer* transfer)
 					              InterfaceId, user_data->noack, user_data->MessageId, RequestID,
 					              WINPR_ASSERTING_INT_CAST(uint32_t, transfer->num_iso_packets),
 					              transfer->status, user_data->StartFrame, user_data->ErrorCount,
-					              user_data->OutputBufferSize);
+					              user_data->OutputBufferSize, user_data->transferDir);
 					user_data->data = nullptr;
 				}
 				ArrayList_Remove(list, transfer);
@@ -336,11 +337,22 @@ static const LIBUSB_ENDPOINT_DESCEIPTOR* func_get_ep_desc(LIBUSB_CONFIG_DESCRIPT
 
 	for (UINT32 inum = 0; inum < MsConfig->NumInterfaces; inum++)
 	{
+		if (inum >= LibusbConfig->bNumInterfaces)
+			continue;
+
+		const LIBUSB_INTERFACE* ifc = &interface[inum];
 		BYTE alt = MsInterfaces[inum]->AlternateSetting;
-		const LIBUSB_ENDPOINT_DESCEIPTOR* endpoint = interface[inum].altsetting[alt].endpoint;
+		if (alt >= ifc->num_altsetting)
+			continue;
+
+		const struct libusb_interface_descriptor* altifc = &ifc->altsetting[alt];
+		const LIBUSB_ENDPOINT_DESCEIPTOR* endpoint = altifc->endpoint;
 
 		for (UINT32 pnum = 0; pnum < MsInterfaces[inum]->NumberOfPipes; pnum++)
 		{
+			if (pnum >= altifc->bNumEndpoints)
+				continue;
+
 			if (endpoint[pnum].bEndpointAddress == EndpointAddress)
 			{
 				return &endpoint[pnum];
@@ -377,7 +389,8 @@ static void LIBUSB_CALL func_bulk_transfer_cb(struct libusb_transfer* transfer)
 		              user_data->noack, user_data->MessageId, RequestID,
 		              WINPR_ASSERTING_INT_CAST(uint32_t, transfer->num_iso_packets),
 		              transfer->status, user_data->StartFrame, user_data->ErrorCount,
-		              WINPR_ASSERTING_INT_CAST(uint32_t, transfer->actual_length));
+		              WINPR_ASSERTING_INT_CAST(uint32_t, transfer->actual_length),
+		              user_data->transferDir);
 		user_data->data = nullptr;
 		ArrayList_Remove(list, transfer);
 	}
@@ -835,7 +848,6 @@ static UINT32 libusb_udev_control_query_device_text(IUDEVICE* idev, UINT32 TextT
 	BYTE bus_number = 0;
 	BYTE device_address = 0;
 	int ret = 0;
-	size_t len = 0;
 	URBDRC_PLUGIN* urbdrc = nullptr;
 	WCHAR* text = (WCHAR*)Buffer;
 	BYTE slen = 0;
@@ -875,47 +887,61 @@ static UINT32 libusb_udev_control_query_device_text(IUDEVICE* idev, UINT32 TextT
 				           "%s [%d], iProduct: %" PRIu8 "!",
 				           msg, ret, devDescriptor->iProduct);
 
-				len = MIN(sizeof(strDesc), inSize);
+				size_t len = MIN(sizeof(strDesc), inSize);
 				for (size_t i = 0; i < len; i++)
 					text[i] = (WCHAR)strDesc[i];
 
-				*BufferSize = (BYTE)(len * 2);
+				*BufferSize = (BYTE)(len * sizeof(WCHAR));
 			}
 			else
 			{
-				/* ret and slen should be equals, but you never know creativity
-				 * of device manufacturers...
-				 * So also check the string length returned as server side does
-				 * not honor strings with multi '\0' characters well.
-				 */
-				const size_t rchar = _wcsnlen((WCHAR*)&data[2], sizeof(data) / sizeof(WCHAR));
-				len = MIN((BYTE)ret - 2, slen);
-				len = MIN(len, inSize);
-				len = MIN(len, rchar * sizeof(WCHAR) + sizeof(WCHAR));
-				memcpy(Buffer, &data[2], len);
+				size_t maxlen = inSize;
+				size_t len = 0;
+				if (inSize > sizeof(WCHAR))
+				{
+					maxlen -= sizeof(WCHAR);
 
-				/* Just as above, the returned WCHAR string should be '\0'
-				 * terminated, but never trust hardware to conform to specs... */
-				Buffer[len - 2] = '\0';
-				Buffer[len - 1] = '\0';
+					/* ret and slen should be equals, but you never know creativity
+					 * of device manufacturers...
+					 * So also check the string length returned as server side does
+					 * not honor strings with multi '\0' characters well.
+					 */
+					const size_t rchar =
+					    _wcsnlen((WCHAR*)&data[2], (sizeof(data) / sizeof(WCHAR)) - 1);
+					len = MIN((BYTE)ret - 2, slen);
+					len = MIN(len, rchar * sizeof(WCHAR));
+					len = MIN(len, maxlen);
+
+					memcpy(Buffer, &data[2], len);
+
+					/* Just as above, the returned WCHAR string should be '\0'
+					 * terminated, but never trust hardware to conform to specs... */
+					if (Buffer[len] != '\0')
+					{
+						Buffer[len++] = '\0';
+						Buffer[len++] = '\0';
+					}
+				}
 				*BufferSize = (BYTE)len;
 			}
 		}
 		break;
 
 		case DeviceTextLocationInformation:
+		{
 			bus_number = libusb_get_bus_number(pdev->libusb_dev);
 			device_address = libusb_get_device_address(pdev->libusb_dev);
 			(void)sprintf_s(deviceLocation, sizeof(deviceLocation),
 			                "Port_#%04" PRIu8 ".Hub_#%04" PRIu8 "", device_address, bus_number);
 
-			len = strnlen(deviceLocation,
-			              MIN(sizeof(deviceLocation), (inSize > 0) ? inSize - 1U : 0));
+			size_t len = strnlen(deviceLocation,
+			                     MIN(sizeof(deviceLocation), (inSize > 0) ? inSize - 1U : 0));
 			for (size_t i = 0; i < len; i++)
 				text[i] = (WCHAR)deviceLocation[i];
 			text[len++] = '\0';
 			*BufferSize = (UINT8)(len * sizeof(WCHAR));
-			break;
+		}
+		break;
 
 		default:
 			WLog_Print(urbdrc->log, WLOG_DEBUG, "Query Text: unknown TextType %" PRIu32 "",
@@ -937,10 +963,20 @@ static int libusb_udev_os_feature_descriptor_request(IUDEVICE* idev,
 	BYTE ms_string_desc[0x13] = WINPR_C_ARRAY_INIT;
 	int error = 0;
 
-	WINPR_ASSERT(idev);
+	WINPR_ASSERT(pdev);
+	WINPR_ASSERT(pdev->urbdrc);
 	WINPR_ASSERT(UsbdStatus);
 	WINPR_ASSERT(BufferSize);
-	WINPR_ASSERT(*BufferSize <= UINT16_MAX);
+
+	if (*BufferSize > UINT16_MAX)
+	{
+		WLog_Print(pdev->urbdrc->log, WLOG_ERROR, "BufferSize %" PRIu32 " > %d", *BufferSize,
+		           UINT16_MAX);
+		return -1;
+	}
+
+	const UINT16 requestedSize = WINPR_ASSERTING_INT_CAST(UINT16, *BufferSize);
+	*BufferSize = 0;
 
 	/*
 	pdev->request_queue->register_request(pdev->request_queue, RequestId, nullptr, 0);
@@ -959,7 +995,7 @@ static int libusb_udev_os_feature_descriptor_request(IUDEVICE* idev,
 		    pdev->libusb_handle,
 		    (uint8_t)LIBUSB_ENDPOINT_IN | (uint8_t)LIBUSB_REQUEST_TYPE_VENDOR | Recipient,
 		    bMS_Vendorcode, (UINT16)((InterfaceNumber << 8) | Ms_PageIndex), Ms_featureDescIndex,
-		    Buffer, (UINT16)*BufferSize, Timeout);
+		    Buffer, requestedSize, Timeout);
 		log_libusb_result(pdev->urbdrc->log, WLOG_DEBUG, "libusb_control_transfer", error);
 
 		if (error >= 0)
@@ -1199,6 +1235,8 @@ static int libusb_udev_query_device_port_status(IUDEVICE* idev, UINT32* UsbdStat
 	int ret = 0;
 	URBDRC_PLUGIN* urbdrc = nullptr;
 
+	WINPR_ASSERT(BufferSize);
+
 	if (!pdev || !pdev->urbdrc)
 		return -1;
 
@@ -1232,7 +1270,7 @@ static int libusb_udev_isoch_transfer(IUDEVICE* idev, GENERIC_CHANNEL_CALLBACK* 
                                       UINT32 ErrorCount, BOOL NoAck,
                                       WINPR_ATTR_UNUSED const BYTE* packetDescriptorData,
                                       UINT32 NumberOfPackets, UINT32 BufferSize, const BYTE* Buffer,
-                                      t_isoch_transfer_cb cb, UINT32 Timeout)
+                                      int transferDir, t_isoch_transfer_cb cb, UINT32 Timeout)
 {
 	int rc = 0;
 	UINT32 iso_packet_size = 0;
@@ -1248,7 +1286,7 @@ static int libusb_udev_isoch_transfer(IUDEVICE* idev, GENERIC_CHANNEL_CALLBACK* 
 
 	urbdrc = pdev->urbdrc;
 	user_data = async_transfer_user_data_new(idev, MessageId, 48, BufferSize, Buffer,
-	                                         outSize + 1024, NoAck, cb, callback);
+	                                         outSize + 1024, NoAck, transferDir, cb, callback);
 
 	if (!user_data)
 		return -1;
@@ -1308,18 +1346,28 @@ static BOOL libusb_udev_control_transfer(IUDEVICE* idev, WINPR_ATTR_UNUSED UINT3
 	UDEVICE* pdev = (UDEVICE*)idev;
 
 	WINPR_ASSERT(BufferSize);
-	WINPR_ASSERT(*BufferSize <= UINT16_MAX);
 
 	if (!pdev || !pdev->urbdrc)
 		return FALSE;
 
-	status = libusb_control_transfer(pdev->libusb_handle, bmRequestType, Request, Value, Index,
-	                                 Buffer, (UINT16)*BufferSize, Timeout);
+	if (*BufferSize > UINT16_MAX)
+	{
+		WLog_Print(pdev->urbdrc->log, WLOG_ERROR, "BufferSize %" PRIu32 " > %d", *BufferSize,
+		           UINT16_MAX);
+		return FALSE;
+	}
+
+	status =
+	    libusb_control_transfer(pdev->libusb_handle, bmRequestType, Request, Value, Index, Buffer,
+	                            WINPR_ASSERTING_INT_CAST(UINT16, *BufferSize), Timeout);
 
 	if (status >= 0)
 		*BufferSize = (UINT32)status;
 	else
+	{
+		*BufferSize = 0;
 		log_libusb_result(pdev->urbdrc->log, WLOG_ERROR, "libusb_control_transfer", status);
+	}
 
 	if (!func_set_usbd_status(pdev->urbdrc, pdev, UrbdStatus, status))
 		return FALSE;
@@ -1327,12 +1375,10 @@ static BOOL libusb_udev_control_transfer(IUDEVICE* idev, WINPR_ATTR_UNUSED UINT3
 	return TRUE;
 }
 
-static int libusb_udev_bulk_or_interrupt_transfer(IUDEVICE* idev,
-                                                  GENERIC_CHANNEL_CALLBACK* callback,
-                                                  UINT32 MessageId, UINT32 RequestId,
-                                                  UINT32 EndpointAddress, UINT32 TransferFlags,
-                                                  BOOL NoAck, UINT32 BufferSize, const BYTE* data,
-                                                  t_isoch_transfer_cb cb, UINT32 Timeout)
+static int libusb_udev_bulk_or_interrupt_transfer(
+    IUDEVICE* idev, GENERIC_CHANNEL_CALLBACK* callback, UINT32 MessageId, UINT32 RequestId,
+    UINT32 EndpointAddress, UINT32 TransferFlags, BOOL NoAck, UINT32 BufferSize, const BYTE* data,
+    int transferDir, t_isoch_transfer_cb cb, UINT32 Timeout)
 {
 	int rc = 0;
 	UINT32 transfer_type = 0;
@@ -1347,8 +1393,8 @@ static int libusb_udev_bulk_or_interrupt_transfer(IUDEVICE* idev,
 		return -1;
 
 	urbdrc = pdev->urbdrc;
-	user_data =
-	    async_transfer_user_data_new(idev, MessageId, 36, BufferSize, data, 0, NoAck, cb, callback);
+	user_data = async_transfer_user_data_new(idev, MessageId, 36, BufferSize, data, 0, NoAck,
+	                                         transferDir, cb, callback);
 
 	if (!user_data)
 		return -1;

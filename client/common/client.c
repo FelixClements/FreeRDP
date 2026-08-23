@@ -39,6 +39,7 @@
 #include <freerdp/client/channels.h>
 #include <freerdp/event.h>
 #include <freerdp/utils/smartcardlogon.h>
+#include <freerdp/session.h>
 
 #if defined(CHANNEL_AINPUT_CLIENT)
 #include <freerdp/client/ainput.h>
@@ -90,6 +91,10 @@ static void set_default_callbacks(freerdp* instance)
 	instance->LogonErrorInfo = client_cli_logon_error_info;
 	instance->GetAccessToken = client_cli_get_access_token;
 	instance->RetryDialog = client_common_retry_dialog;
+
+	WINPR_ASSERT(instance->context);
+	WINPR_ASSERT(instance->context->update);
+	instance->context->update->SaveSessionInfo = client_common_save_session_info;
 }
 
 static void client_cli_user_notification(void* context, const UserNotificationEventArgs* e)
@@ -757,6 +762,7 @@ static DWORD client_cli_accept_certificate(freerdp* instance)
 			case 'y':
 			case 'Y':
 				answer = freerdp_interruptible_getc(instance->context, stdin);
+				printf("\n");
 				if (answer == EOF)
 					return 0;
 				return 1;
@@ -764,6 +770,7 @@ static DWORD client_cli_accept_certificate(freerdp* instance)
 			case 't':
 			case 'T':
 				answer = freerdp_interruptible_getc(instance->context, stdin);
+				printf("\n");
 				if (answer == EOF)
 					return 0;
 				return 2;
@@ -771,6 +778,7 @@ static DWORD client_cli_accept_certificate(freerdp* instance)
 			case 'n':
 			case 'N':
 				answer = freerdp_interruptible_getc(instance->context, stdin);
+				printf("\n");
 				if (answer == EOF)
 					return 0;
 				return 0;
@@ -778,8 +786,6 @@ static DWORD client_cli_accept_certificate(freerdp* instance)
 			default:
 				break;
 		}
-
-		printf("\n");
 	}
 }
 
@@ -1068,19 +1074,17 @@ BOOL client_cli_present_gateway_message(freerdp* instance, UINT32 type, BOOL isD
 		{
 			case 'y':
 			case 'Y':
-				if (confirm == EOF)
-					return FALSE;
-				return TRUE;
+				printf("\n");
+				return confirm != EOF;
 
 			case 'n':
 			case 'N':
+				printf("\n");
 				return FALSE;
 
 			default:
 				break;
 		}
-
-		printf("\n");
 	}
 
 	return TRUE;
@@ -2658,4 +2662,13 @@ char* freerdp_client_get_aad_url(rdpClientContext* cctx, freerdp_client_aad_type
 	}
 	va_end(ap);
 	return str;
+}
+
+BOOL client_common_save_session_info(WINPR_ATTR_UNUSED rdpContext* context, UINT32 type,
+                                     const void* data)
+{
+	char buffer[128] = WINPR_C_ARRAY_INIT;
+	WLog_INFO(TAG, "%s [%s]", freerdp_session_logon_type_str(type),
+	          freerdp_session_logon_type_data_str(type, data, buffer, sizeof(buffer)));
+	return TRUE;
 }

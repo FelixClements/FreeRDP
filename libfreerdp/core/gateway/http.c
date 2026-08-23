@@ -97,34 +97,6 @@ struct s_http_response
 
 static wHashTable* HashTable_New_String(void);
 
-static const char* string_strnstr(const char* str1, const char* str2, size_t slen)
-{
-	char c = 0;
-	char sc = 0;
-	size_t len = 0;
-
-	if ((c = *str2++) != '\0')
-	{
-		len = strnlen(str2, slen + 1);
-
-		do
-		{
-			do
-			{
-				if (slen-- < 1 || (sc = *str1++) == '\0')
-					return nullptr;
-			} while (sc != c);
-
-			if (len > slen)
-				return nullptr;
-		} while (strncmp(str1, str2, len) != 0);
-
-		str1--;
-	}
-
-	return str1;
-}
-
 static BOOL strings_equals_nocase(const void* obj1, const void* obj2)
 {
 	if (!obj1 || !obj2)
@@ -322,14 +294,18 @@ BOOL http_context_append_pragma(HttpContext* context, const char* Pragma, ...)
 	return list_append(context, Pragma, ap);
 }
 
-BOOL http_context_set_rdg_connection_id(HttpContext* context, const GUID* RdgConnectionId)
+BOOL http_context_set_rdg_connection_id(HttpContext* context)
 {
-	if (!context || !RdgConnectionId)
+	if (!context)
+		return FALSE;
+
+	GUID RdgConnectionId;
+	if (UuidCreate(&RdgConnectionId) != RPC_S_OK)
 		return FALSE;
 
 	char buffer[64] = WINPR_C_ARRAY_INIT;
 	return http_context_set_header(context, "RDG-Connection-Id", "{%s}",
-	                               guid2str(RdgConnectionId, buffer, sizeof(buffer)));
+	                               guid2str(&RdgConnectionId, buffer, sizeof(buffer)));
 }
 
 BOOL http_context_set_rdg_correlation_id(HttpContext* context, const GUID* RdgCorrelationId)
@@ -1206,7 +1182,7 @@ static SSIZE_T http_response_recv_line(rdpTls* tls, HttpResponse* response)
 		s = (position > 8) ? 8 : position;
 		end = (char*)Stream_Pointer(response->data) - s;
 
-		if (string_strnstr(end, "\r\n\r\n", s) != nullptr)
+		if (winpr_strnstr(end, "\r\n\r\n", s) != nullptr)
 			payloadOffset = WINPR_ASSERTING_INT_CAST(SSIZE_T, Stream_GetPosition(response->data));
 	}
 
@@ -1249,6 +1225,11 @@ static BOOL http_response_recv_body(rdpTls* tls, HttpResponse* response, BOOL re
 			{
 				Stream_Seek(response->data, (size_t)status);
 				full_len += status;
+			}
+			if (Stream_GetPosition(response->data) > RESPONSE_SIZE_LIMIT)
+			{
+				WLog_ERR(TAG, "http response limit exceeded!");
+				goto out_error;
 			}
 		} while (ctx.state != ChunkStateEnd);
 		response->BodyLength = WINPR_ASSERTING_INT_CAST(uint32_t, full_len);
@@ -1345,12 +1326,12 @@ HttpResponse* http_response_recv(rdpTls* tls, BOOL readContentLength)
 	{
 		size_t count = 0;
 		char* buffer = Stream_BufferAs(response->data, char);
-		const char* line = Stream_BufferAs(response->data, char);
+		char* line = Stream_BufferAs(response->data, char);
 		char* context = nullptr;
 
-		while ((line = string_strnstr(line, "\r\n",
-		                              WINPR_ASSERTING_INT_CAST(size_t, payloadOffset) -
-		                                  WINPR_ASSERTING_INT_CAST(size_t, (line - buffer)) - 2UL)))
+		while ((line = winpr_strnstr(line, "\r\n",
+		                             WINPR_ASSERTING_INT_CAST(size_t, payloadOffset) -
+		                                 WINPR_ASSERTING_INT_CAST(size_t, (line - buffer)) - 2UL)))
 		{
 			line += 2;
 			count++;

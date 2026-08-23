@@ -27,6 +27,8 @@
 #include <winpr/file.h>
 #include <winpr/cast.h>
 
+#include <freerdp/utils/warnings.h>
+
 #include <freerdp/client.h>
 #include <freerdp/client/file.h>
 #include <freerdp/client/cmdline.h>
@@ -205,6 +207,8 @@ struct rdp_file
 
 	LPSTR GatewayAccessToken; /* gatewayaccesstoken */
 
+	LPSTR EndpointFedAuthToken; /* endpointfedauth */
+
 	LPSTR DrivesToRedirect;  /* drivestoredirect */
 	LPSTR DevicesToRedirect; /* devicestoredirect */
 	LPSTR WinPosStr;         /* winposstr */
@@ -244,6 +248,7 @@ static const char key_str_alternate_shell[] = "alternate shell";
 static const char key_str_shell_working_directory[] = "shell working directory";
 static const char key_str_gatewayhostname[] = "gatewayhostname";
 static const char key_str_gatewayaccesstoken[] = "gatewayaccesstoken";
+static const char key_str_endpointfedauth[] = "endpointfedauth";
 static const char key_str_resourceprovider[] = "resourceprovider";
 static const char str_resourceprovider_arm[] = "arm";
 static const char key_str_kdcproxyname[] = "kdcproxyname";
@@ -583,6 +588,8 @@ static BOOL freerdp_client_rdp_file_find_string_entry(rdpFile* file, const char*
 		*outValue = &file->activityhint;
 	else if (_stricmp(name, key_str_gatewayaccesstoken) == 0)
 		*outValue = &file->GatewayAccessToken;
+	else if (_stricmp(name, key_str_endpointfedauth) == 0)
+		*outValue = &file->EndpointFedAuthToken;
 	else if (_stricmp(name, key_str_kdcproxyname) == 0)
 		*outValue = &file->KdcProxyName;
 	else if (_stricmp(name, key_str_drivestoredirect) == 0)
@@ -774,16 +781,6 @@ static SSIZE_T freerdp_client_rdp_file_add_line(rdpFile* file)
 	return index;
 }
 
-static BOOL freerdp_client_parse_rdp_file_string(rdpFile* file, char* name, char* value)
-{
-	return freerdp_client_rdp_file_set_string(file, name, value);
-}
-
-static BOOL freerdp_client_parse_rdp_file_option(rdpFile* file, const char* option)
-{
-	return freerdp_client_add_option(file, option);
-}
-
 BOOL freerdp_client_parse_rdp_file_buffer(rdpFile* file, const BYTE* buffer, size_t size)
 {
 	return freerdp_client_parse_rdp_file_buffer_ex(file, buffer, size, nullptr);
@@ -840,6 +837,8 @@ static BOOL trim_strings(rdpFile* file)
 		return FALSE;
 	if (!trim(&file->GatewayAccessToken))
 		return FALSE;
+	if (!trim(&file->EndpointFedAuthToken))
+		return FALSE;
 	if (!trim(&file->RemoteApplicationName))
 		return FALSE;
 	if (!trim(&file->RemoteApplicationIcon))
@@ -882,19 +881,71 @@ static BOOL trim_strings(rdpFile* file)
 	return TRUE;
 }
 
+static BOOL parse_line(rdpFile* file, char* line, size_t length, rdp_file_fkt_parse parse)
+{
+	if (length <= 1)
+		return TRUE;
+
+	const char* beg = line;
+#if !defined(WITHOUT_FREERDP_3x_DEPRECATED)
+#if defined(WITH_EMBEDDED_CLI_IN_RDP_FILES)
+	if (beg[0] == '/')
+	{
+		freerdp_warn_deprecated(WLog_Get(TAG), "Parsing CLI options within an RDP file",
+		                        "Will be removed in FreeRDP 4.0");
+		if (!freerdp_client_add_option(file, line))
+			return FALSE;
+
+		return TRUE; /* FreeRDP option */
+	}
+#endif
+#endif
+
+	char* d1 = strchr(line, ':');
+
+	if (!d1)
+		return TRUE; /* not first delimiter */
+
+	const char* type = &d1[1];
+	char* d2 = strchr(type, ':');
+
+	if (!d2)
+		return TRUE; /* no second delimiter */
+
+	if ((d2 - d1) != 2)
+		return TRUE; /* improper type length */
+
+	*d1 = 0;
+	*d2 = 0;
+	const char* name = beg;
+	const char* value = &d2[1];
+
+	if (parse && parse(file->context, name, *type, value))
+		return TRUE;
+
+	if (*type == 'i')
+	{
+		/* integer type */
+		return freerdp_client_parse_rdp_file_integer(file, name, value);
+	}
+	if (*type == 's')
+	{
+		/* string type */
+		return freerdp_client_rdp_file_set_string(file, name, value);
+	}
+	if (*type == 'b')
+	{
+		/* binary type */
+		WLog_ERR(TAG, "Unsupported RDP file binary option %s [value=%s]", name, value);
+	}
+
+	return TRUE;
+}
+
 BOOL freerdp_client_parse_rdp_file_buffer_ex(rdpFile* file, const BYTE* buffer, size_t size,
                                              rdp_file_fkt_parse parse)
 {
 	BOOL rc = FALSE;
-	size_t length = 0;
-	char* line = nullptr;
-	char* type = nullptr;
-	char* context = nullptr;
-	char* d1 = nullptr;
-	char* d2 = nullptr;
-	char* beg = nullptr;
-	char* name = nullptr;
-	char* value = nullptr;
 	char* copy = nullptr;
 
 	if (!file)
@@ -905,9 +956,8 @@ BOOL freerdp_client_parse_rdp_file_buffer_ex(rdpFile* file, const BYTE* buffer, 
 	if ((buffer[0] == BOM_UTF16_LE[0]) && (buffer[1] == BOM_UTF16_LE[1]))
 	{
 		LPCWSTR uc = (LPCWSTR)(&buffer[2]);
-		size = size / sizeof(WCHAR) - 1;
-
-		copy = ConvertWCharNToUtf8Alloc(uc, size, nullptr);
+		const size_t charlen = size / sizeof(WCHAR) - 1;
+		copy = ConvertWCharNToUtf8Alloc(uc, charlen, &size);
 		if (!copy)
 		{
 			WLog_ERR(TAG, "Failed to convert RDP file from UCS2 to UTF8");
@@ -924,65 +974,16 @@ BOOL freerdp_client_parse_rdp_file_buffer_ex(rdpFile* file, const BYTE* buffer, 
 		memcpy(copy, buffer, size);
 	}
 
-	line = strtok_s(copy, "\r\n", &context);
+	char* context = nullptr;
+	char* line = strtok_s(copy, "\r\n", &context);
 
 	while (line)
 	{
-		length = strnlen(line, size);
+		const size_t length = strnlen(line, size);
 
-		if (length > 1)
-		{
-			beg = line;
-			if (beg[0] == '/')
-			{
-				if (!freerdp_client_parse_rdp_file_option(file, line))
-					goto fail;
+		if (!parse_line(file, line, length, parse))
+			goto fail;
 
-				goto next_line; /* FreeRDP option */
-			}
-
-			d1 = strchr(line, ':');
-
-			if (!d1)
-				goto next_line; /* not first delimiter */
-
-			type = &d1[1];
-			d2 = strchr(type, ':');
-
-			if (!d2)
-				goto next_line; /* no second delimiter */
-
-			if ((d2 - d1) != 2)
-				goto next_line; /* improper type length */
-
-			*d1 = 0;
-			*d2 = 0;
-			name = beg;
-			value = &d2[1];
-
-			if (parse && parse(file->context, name, *type, value))
-			{
-			}
-			else if (*type == 'i')
-			{
-				/* integer type */
-				if (!freerdp_client_parse_rdp_file_integer(file, name, value))
-					goto fail;
-			}
-			else if (*type == 's')
-			{
-				/* string type */
-				if (!freerdp_client_parse_rdp_file_string(file, name, value))
-					goto fail;
-			}
-			else if (*type == 'b')
-			{
-				/* binary type */
-				WLog_ERR(TAG, "Unsupported RDP file binary option %s [value=%s]", name, value);
-			}
-		}
-
-	next_line:
 		line = strtok_s(nullptr, "\r\n", &context);
 	}
 
@@ -1249,6 +1250,8 @@ BOOL freerdp_client_populate_rdp_file_from_settings(rdpFile* file, const rdpSett
 	file->RemoteApplicationMode = WINPR_ASSERTING_INT_CAST(
 	    UINT32, freerdp_settings_get_bool(settings, FreeRDP_RemoteApplicationMode));
 	if (!FILE_POPULATE_STRING(&file->GatewayAccessToken, settings, FreeRDP_GatewayAccessToken) ||
+	    !FILE_POPULATE_STRING(&file->EndpointFedAuthToken, settings,
+	                          FreeRDP_EndpointFedAuthToken) ||
 	    !FILE_POPULATE_STRING(&file->RemoteApplicationProgram, settings,
 	                          FreeRDP_RemoteApplicationProgram) ||
 	    !FILE_POPULATE_STRING(&file->RemoteApplicationName, settings,
@@ -1627,6 +1630,7 @@ static SSIZE_T write_string_parameters(const rdpFile* file, char* buffer, size_t
 		{ key_str_hubdiscoverygeourl, file->hubdiscoverygeourl },
 		{ key_str_activityhint, file->activityhint },
 		{ key_str_gatewayaccesstoken, file->GatewayAccessToken },
+		{ key_str_endpointfedauth, file->EndpointFedAuthToken },
 		{ key_str_kdcproxyname, file->KdcProxyName },
 		{ key_str_drivestoredirect, file->DrivesToRedirect },
 		{ key_str_devicestoredirect, file->DevicesToRedirect },
@@ -2177,6 +2181,13 @@ BOOL freerdp_client_populate_settings_from_rdp_file_unchecked(const rdpFile* fil
 			return FALSE;
 	}
 
+	if (~((size_t)file->EndpointFedAuthToken))
+	{
+		if (!freerdp_settings_set_string(settings, FreeRDP_EndpointFedAuthToken,
+		                                 file->EndpointFedAuthToken))
+			return FALSE;
+	}
+
 	if (~file->GatewayUsageMethod)
 	{
 		if (!freerdp_set_gateway_usage_method(settings, file->GatewayUsageMethod))
@@ -2533,7 +2544,6 @@ BOOL freerdp_client_populate_settings_from_rdp_file_unchecked(const rdpFile* fil
 			if ((val >= UINT32_MAX) && (errno != 0))
 			{
 				CommandLineParserFree(ptr);
-				free(list);
 				return FALSE;
 			}
 			list[x] = (UINT32)val;

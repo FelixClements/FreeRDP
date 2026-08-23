@@ -30,6 +30,7 @@
 #include <freerdp/codec/h264.h>
 #include <freerdp/codec/yuv.h>
 #include <freerdp/log.h>
+#include <freerdp/codec/region.h>
 
 #include "h264.h"
 
@@ -125,16 +126,55 @@ static BOOL isRectValid(UINT32 width, UINT32 height, const RECTANGLE_16* rect)
 	return TRUE;
 }
 
-static BOOL areRectsValid(UINT32 width, UINT32 height, const RECTANGLE_16* rects, UINT32 count)
+static BOOL areRectsValid(wLog* log, UINT32 width, UINT32 height, const RECTANGLE_16* rects,
+                          UINT32 count)
 {
 	WINPR_ASSERT(rects || (count == 0));
 	for (size_t x = 0; x < count; x++)
 	{
 		const RECTANGLE_16* rect = &rects[x];
 		if (!isRectValid(width, height, rect))
+		{
+			char buffer[64] = WINPR_C_ARRAY_INIT;
+			WLog_Print(log, WLOG_WARN,
+			           "Rectangle %" PRIuz " %s outside of bounding frame %" PRIu32 "x%" PRIu32, x,
+			           rectangle_to_string(rect, buffer, sizeof(buffer)), width, height);
 			return FALSE;
+		}
 	}
 	return TRUE;
+}
+
+static int log_decompress(H264_CONTEXT* h264, const BYTE* pSrcData, UINT32 SrcSize,
+                          const RECTANGLE_16* rects, UINT32 nrRects)
+{
+	const int status = h264->subsystem->Decompress(h264, pSrcData, SrcSize);
+	if (status < 0)
+	{
+		WLog_Print(h264->log, WLOG_WARN, "H264 decompress failed with %d", status);
+		return status;
+	}
+
+	/* Do not check for width.
+	 * The width might be aligned to multiples of 16.
+	 * Some decoders add the alignment only if width %16 != 0 others unconditionally
+	 *
+	 * We already checked the areas that will be copied against context dimensions
+	 * and after this check we also check against the decoded H264 surface dimensions.
+	 */
+	if (h264->YUVHeight > h264->height)
+	{
+		WLog_Print(h264->log, WLOG_WARN,
+		           "H264 decompress: frame %" PRIu32 "x%" PRIu32 " exceeds buffer size %" PRIu32
+		           "x%" PRIu32,
+		           h264->YUVWidth, h264->YUVHeight, h264->width, h264->height);
+		return -1014;
+	}
+	/* some server implementations (krdc) use H264 frames smaller than the surface sizes,
+	 * validate the regions against this size as well */
+	if (!areRectsValid(h264->log, h264->YUVWidth, h264->YUVHeight, rects, nrRects))
+		return -1015;
+	return status;
 }
 
 INT32 avc420_decompress(H264_CONTEXT* h264, const BYTE* pSrcData, UINT32 SrcSize, BYTE* pDstData,
@@ -148,10 +188,10 @@ INT32 avc420_decompress(H264_CONTEXT* h264, const BYTE* pSrcData, UINT32 SrcSize
 	if (!h264 || h264->Compressor)
 		return -1001;
 
-	if (!areRectsValid(nDstWidth, nDstHeight, regionRects, numRegionRects))
+	if (!areRectsValid(h264->log, nDstWidth, nDstHeight, regionRects, numRegionRects))
 		return -1013;
 
-	status = h264->subsystem->Decompress(h264, pSrcData, SrcSize);
+	status = log_decompress(h264, pSrcData, SrcSize, regionRects, numRegionRects);
 
 	if (status == 0)
 		return 1;
@@ -162,7 +202,7 @@ INT32 avc420_decompress(H264_CONTEXT* h264, const BYTE* pSrcData, UINT32 SrcSize
 	pYUVData[0] = h264->pYUVData[0];
 	pYUVData[1] = h264->pYUVData[1];
 	pYUVData[2] = h264->pYUVData[2];
-	if (!yuv420_context_decode(h264->yuv, pYUVData, h264->iStride, h264->height, DstFormat,
+	if (!yuv420_context_decode(h264->yuv, pYUVData, h264->iStride, h264->YUVHeight, DstFormat,
 	                           pDstData, nDstStep, regionRects, numRegionRects))
 		return -1002;
 
@@ -261,9 +301,9 @@ static BOOL detect_changes(BOOL firstFrameDone, const UINT32 QP, const RECTANGLE
 	}
 	else
 	{
-		for (size_t y = regionRect->top; y < regionRect->bottom; y += 64)
+		for (size_t y = 0; y < regionRect->bottom - regionRect->top; y += 64)
 		{
-			for (size_t x = regionRect->left; x < regionRect->right; x += 64)
+			for (size_t x = 0; x < regionRect->right - regionRect->left; x += 64)
 			{
 				RECTANGLE_16 rect;
 				rect.left = (UINT16)MIN(UINT16_MAX, regionRect->left + x);
@@ -557,13 +597,13 @@ static BOOL avc444_process_rects(H264_CONTEXT* h264, const BYTE* pSrcData, UINT3
                                  WINPR_ATTR_UNUSED UINT32 nDstWidth, UINT32 nDstHeight,
                                  const RECTANGLE_16* rects, UINT32 nrRects, avc444_frame_type type)
 {
-	const BYTE* pYUVData[3];
-	BYTE* pYUVDstData[3];
+	const BYTE* pYUVData[3] = WINPR_C_ARRAY_INIT;
+	BYTE* pYUVDstData[3] = WINPR_C_ARRAY_INIT;
 	UINT32* piDstStride = h264->iYUV444Stride;
 	BYTE** ppYUVDstData = h264->pYUV444Data;
 	const UINT32* piStride = h264->iStride;
 
-	if (h264->subsystem->Decompress(h264, pSrcData, SrcSize) < 0)
+	if (log_decompress(h264, pSrcData, SrcSize, rects, nrRects) < 0)
 		return FALSE;
 
 	pYUVData[0] = h264->pYUVData[0];
@@ -575,7 +615,7 @@ static BOOL avc444_process_rects(H264_CONTEXT* h264, const BYTE* pSrcData, UINT3
 	pYUVDstData[0] = ppYUVDstData[0];
 	pYUVDstData[1] = ppYUVDstData[1];
 	pYUVDstData[2] = ppYUVDstData[2];
-	return (yuv444_context_decode(h264->yuv, (BYTE)type, pYUVData, piStride, h264->height,
+	return (yuv444_context_decode(h264->yuv, (BYTE)type, pYUVData, piStride, h264->YUVHeight,
 	                              pYUVDstData, piDstStride, DstFormat, pDstData, nDstStep, rects,
 	                              nrRects));
 }
@@ -609,9 +649,9 @@ INT32 avc444_decompress(H264_CONTEXT* h264, BYTE op, const RECTANGLE_16* regionR
 	if (!h264 || !regionRects || !pSrcData || !pDstData || h264->Compressor)
 		return -1001;
 
-	if (!areRectsValid(nDstWidth, nDstHeight, regionRects, numRegionRects))
+	if (!areRectsValid(h264->log, nDstWidth, nDstHeight, regionRects, numRegionRects))
 		return -1013;
-	if (!areRectsValid(nDstWidth, nDstHeight, auxRegionRects, numAuxRegionRect))
+	if (!areRectsValid(h264->log, nDstWidth, nDstHeight, auxRegionRects, numAuxRegionRect))
 		return -1014;
 
 	switch (op)

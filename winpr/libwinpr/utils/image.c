@@ -105,8 +105,8 @@ BOOL readBitmapFileHeader(wStream* s, WINPR_BITMAP_FILE_HEADER* bf)
 		           bf->bfType[1]);
 		return FALSE;
 	}
-	return Stream_CheckAndLogRequiredCapacityWLog(log, s,
-	                                              bf->bfSize - sizeof(WINPR_BITMAP_FILE_HEADER));
+	return Stream_CheckAndLogRequiredLengthWLog(log, s,
+	                                            bf->bfSize - sizeof(WINPR_BITMAP_FILE_HEADER));
 }
 
 BOOL writeBitmapInfoHeader(wStream* s, const WINPR_BITMAP_INFO_HEADER* bi)
@@ -152,6 +152,12 @@ BOOL readBitmapInfoHeader(wStream* s, WINPR_BITMAP_INFO_HEADER* bi, size_t* poff
 		return FALSE;
 	}
 
+	if (bi->biWidth < 0)
+	{
+		WLog_WARN(TAG, "negative biWidth=%" PRId32, bi->biWidth);
+		return FALSE;
+	}
+
 	/* https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-bitmapinfoheader */
 	size_t offset = 0;
 	switch (bi->biCompression)
@@ -166,9 +172,23 @@ BOOL readBitmapInfoHeader(wStream* s, WINPR_BITMAP_INFO_HEADER* bi, size_t* poff
 			}
 			if (bi->biSizeImage == 0)
 			{
-				UINT32 stride = WINPR_ASSERTING_INT_CAST(
-				    uint32_t, ((((bi->biWidth * bi->biBitCount) + 31) & ~31) >> 3));
-				bi->biSizeImage = WINPR_ASSERTING_INT_CAST(uint32_t, abs(bi->biHeight)) * stride;
+				const UINT64 rawustride =
+				    WINPR_ASSERTING_INT_CAST(UINT64, bi->biWidth) * bi->biBitCount;
+				const UINT64 ustride = ((rawustride + 31) & ~31u) >> 3;
+				if (ustride > UINT32_MAX)
+				{
+					WLog_ERR(TAG, "bi->biWidth * bi->biBitCount > UINT32_MAX");
+					return FALSE;
+				}
+
+				const UINT32 stride = WINPR_ASSERTING_INT_CAST(uint32_t, ustride);
+				const UINT32 usize = WINPR_ASSERTING_INT_CAST(UINT32, llabs(bi->biHeight)) * stride;
+				if (usize > UINT32_MAX)
+				{
+					WLog_ERR(TAG, "abs(bi->biHeight) * stride > UINT32_MAX");
+					return FALSE;
+				}
+				bi->biSizeImage = WINPR_ASSERTING_INT_CAST(uint32_t, usize);
 			}
 			break;
 		case BI_BITFIELDS:
@@ -447,7 +467,7 @@ static int winpr_image_bitmap_read_buffer(wImage* image, const BYTE* buffer, siz
 		}
 	}
 
-	if (!Stream_CheckAndLogRequiredCapacity(TAG, s, bi.biSizeImage))
+	if (!Stream_CheckAndLogRequiredLength(TAG, s, bi.biSizeImage))
 		goto fail;
 
 	if (bi.biWidth <= 0)
@@ -519,8 +539,7 @@ static int winpr_image_bitmap_read_buffer(wImage* image, const BYTE* buffer, siz
 					for (size_t index = 0; index < image->height; index++)
 					{
 						Stream_Read(s, pDstData, scanline);
-						Stream_Seek(s, image->scanline - scanline);
-						pDstData += scanline;
+						pDstData += image->scanline;
 					}
 				}
 				else
@@ -530,8 +549,7 @@ static int winpr_image_bitmap_read_buffer(wImage* image, const BYTE* buffer, siz
 					for (size_t index = 0; index < image->height; index++)
 					{
 						Stream_Read(s, pDstData, scanline);
-						Stream_Seek(s, image->scanline - scanline);
-						pDstData -= scanline;
+						pDstData -= image->scanline;
 					}
 				}
 			}

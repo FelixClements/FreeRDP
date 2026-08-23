@@ -365,11 +365,6 @@ static UINT serial_process_irp_write(SERIAL_DEVICE* serial, IRP* irp)
  */
 static UINT serial_process_irp_device_control(SERIAL_DEVICE* serial, IRP* irp)
 {
-	UINT32 IoControlCode = 0;
-	UINT32 InputBufferLength = 0;
-	BYTE* InputBuffer = nullptr;
-	UINT32 OutputBufferLength = 0;
-	BYTE* OutputBuffer = nullptr;
 	DWORD BytesReturned = 0;
 
 	WINPR_ASSERT(serial);
@@ -378,34 +373,34 @@ static UINT serial_process_irp_device_control(SERIAL_DEVICE* serial, IRP* irp)
 	if (!Stream_CheckAndLogRequiredLengthWLog(serial->log, irp->input, 32))
 		return ERROR_INVALID_DATA;
 
-	Stream_Read_UINT32(irp->input, OutputBufferLength); /* OutputBufferLength (4 bytes) */
-	Stream_Read_UINT32(irp->input, InputBufferLength);  /* InputBufferLength (4 bytes) */
-	Stream_Read_UINT32(irp->input, IoControlCode);      /* IoControlCode (4 bytes) */
+	const UINT32 OutputBufferLength =
+	    Stream_Get_UINT32(irp->input); /* OutputBufferLength (4 bytes) */
+	const UINT32 InputBufferLength =
+	    Stream_Get_UINT32(irp->input);                          /* InputBufferLength (4 bytes) */
+	const UINT32 IoControlCode = Stream_Get_UINT32(irp->input); /* IoControlCode (4 bytes) */
 	Stream_Seek(irp->input, 20);                        /* Padding (20 bytes) */
 
 	if (!Stream_CheckAndLogRequiredLengthWLog(serial->log, irp->input, InputBufferLength))
 		return ERROR_INVALID_DATA;
 
-	OutputBuffer = (BYTE*)calloc(OutputBufferLength, sizeof(BYTE));
+	const BYTE* InputBuffer = Stream_PointerAs(irp->input, BYTE);
+	if (!Stream_SafeSeek(irp->input, InputBufferLength))
+		return ERROR_INVALID_DATA;
 
-	if (OutputBuffer == nullptr)
-	{
-		irp->IoStatus = STATUS_NO_MEMORY;
-		goto error_handle;
-	}
-
-	InputBuffer = (BYTE*)calloc(InputBufferLength, sizeof(BYTE));
-
-	if (InputBuffer == nullptr)
-	{
-		irp->IoStatus = STATUS_NO_MEMORY;
-		goto error_handle;
-	}
-
-	Stream_Read(irp->input, InputBuffer, InputBufferLength);
 	WLog_Print(serial->log, WLOG_DEBUG,
 	           "CommDeviceIoControl: CompletionId=%" PRIu32 ", IoControlCode=[0x%" PRIX32 "] %s",
 	           irp->CompletionId, IoControlCode, _comm_serial_ioctl_name(IoControlCode));
+
+	BYTE* OutputBuffer = nullptr;
+	if (OutputBufferLength > 0)
+	{
+		OutputBuffer = (BYTE*)calloc(OutputBufferLength, sizeof(BYTE));
+		if (!OutputBuffer)
+		{
+			irp->IoStatus = STATUS_NO_MEMORY;
+			goto error_handle;
+		}
+	}
 
 	/* FIXME: CommDeviceIoControl to be replaced by DeviceIoControl() */
 	if (CommDeviceIoControl(serial->hComm, IoControlCode, InputBuffer, InputBufferLength,
@@ -426,10 +421,6 @@ static UINT serial_process_irp_device_control(SERIAL_DEVICE* serial, IRP* irp)
 	}
 
 error_handle:
-	/* FIXME: find out whether it's required or not to get
-	 * BytesReturned == OutputBufferLength when
-	 * CommDeviceIoControl returns FALSE */
-	WINPR_ASSERT(OutputBufferLength == BytesReturned);
 	Stream_Write_UINT32(irp->output, BytesReturned); /* OutputBufferLength (4 bytes) */
 
 	if (BytesReturned > 0)
@@ -437,7 +428,6 @@ error_handle:
 		if (!Stream_EnsureRemainingCapacity(irp->output, BytesReturned))
 		{
 			WLog_Print(serial->log, WLOG_ERROR, "Stream_EnsureRemainingCapacity failed!");
-			free(InputBuffer);
 			free(OutputBuffer);
 			return CHANNEL_RC_NO_MEMORY;
 		}
@@ -453,7 +443,6 @@ error_handle:
 	/* { */
 	/* 	Stream_Write_UINT8(irp->output, 0); /\* Padding (1 byte) *\/ */
 	/* } */
-	free(InputBuffer);
 	free(OutputBuffer);
 	return CHANNEL_RC_OK;
 }

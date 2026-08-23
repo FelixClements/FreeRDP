@@ -63,7 +63,7 @@ static const COMMAND_LINE_ARGUMENT_A global_cmd_args[] = {
 	  "Asynchronous channels (experimental)" },
 	{ "async-update", COMMAND_LINE_VALUE_BOOL, nullptr, BoolValueFalse, nullptr, -1, nullptr,
 	  "Asynchronous update" },
-	{ "audio-mode", COMMAND_LINE_VALUE_REQUIRED, "[[none|0]|[redirect|1]|[server|2]]", nullptr,
+	{ "audio-mode", COMMAND_LINE_VALUE_REQUIRED, "[[none|2]|[server|1]|[redirect|0]]", nullptr,
 	  nullptr, -1, nullptr, "Audio output mode" },
 	{ "auth-only", COMMAND_LINE_VALUE_BOOL, nullptr, BoolValueFalse, nullptr, -1, nullptr,
 	  "Authenticate only" },
@@ -167,6 +167,8 @@ static const COMMAND_LINE_ARGUMENT_A global_cmd_args[] = {
 	  "Encryption (experimental)" },
 	{ "encryption-methods", COMMAND_LINE_VALUE_REQUIRED, "[40,][56,][128,][FIPS]", nullptr, nullptr,
 	  -1, nullptr, "RDP standard security encryption methods" },
+	{ "endpointfedauth", COMMAND_LINE_VALUE_REQUIRED, "<token>", nullptr, nullptr, -1, nullptr,
+	  "Endpoint FedAuth token for Hyper-V VM console-connect scenarios" },
 	{ "f", COMMAND_LINE_VALUE_FLAG, nullptr, nullptr, nullptr, -1, nullptr,
 	  "Fullscreen mode (<Ctrl>+<Alt>+<Enter> toggles fullscreen)" },
 	{ "fipsmode", COMMAND_LINE_VALUE_BOOL, nullptr, nullptr, nullptr, -1, nullptr, "FIPS mode" },
@@ -406,8 +408,10 @@ static const COMMAND_LINE_ARGUMENT_A global_cmd_args[] = {
 	  "Pass the hash (restricted admin mode)" },
 	{ "pwidth", COMMAND_LINE_VALUE_REQUIRED, "<width>", nullptr, nullptr, -1, nullptr,
 	  "Physical width of display (in millimeters)" },
+#if !defined(WITHOUT_FREERDP_3x_DEPRECATED)
 	{ "rdp2tcp", COMMAND_LINE_VALUE_REQUIRED, "<executable path[:arg...]>", nullptr, nullptr, -1,
 	  nullptr, "TCP redirection" },
+#endif
 	{ "reconnect-cookie", COMMAND_LINE_VALUE_REQUIRED, "<base64-cookie>", nullptr, nullptr, -1,
 	  nullptr, "Pass base64 reconnect cookie to the connection" },
 	{ "redirect-prefer", COMMAND_LINE_VALUE_REQUIRED, "<FQDN|IP|NETBIOS>,[...]", nullptr, nullptr,
@@ -463,8 +467,10 @@ static const COMMAND_LINE_ARGUMENT_A global_cmd_args[] = {
 	{ "smartcard", COMMAND_LINE_VALUE_OPTIONAL, "<str>[,<str>...]", nullptr, nullptr, -1, nullptr,
 	  "Redirect the smartcard devices containing any of the <str> in their names." },
 	{ "smartcard-logon", COMMAND_LINE_VALUE_OPTIONAL,
-	  "[cert:<path>,key:<key>,pin:<pin>,csp:<csp name>,reader:<reader>,card:<card>]", nullptr,
-	  nullptr, -1, nullptr, "Activates Smartcard (optional certificate) Logon authentication." },
+	  "[[cert:<path>|cert:<base64(PEM)>],[key:<path>|key:<base64(PEM)>],pin:<pin>,csp:<csp "
+	  "name>,reader:<reader>,card:<card>]",
+	  nullptr, nullptr, -1, nullptr,
+	  "Activates Smartcard (optional certificate) Logon authentication." },
 	{ "sound", COMMAND_LINE_VALUE_OPTIONAL,
 	  "[sys:<sys>,][dev:<dev>,][format:<format>,][rate:<rate>,][channel:<channel>,][latency:<"
 	  "latency>,][quality:<quality>]",

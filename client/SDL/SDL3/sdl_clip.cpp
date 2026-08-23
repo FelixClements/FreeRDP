@@ -48,6 +48,8 @@ const char mime_text_utf8[] = mime_text_plain ";charset=utf-8";
 	return values;
 }
 
+static const char s_mime_jxl[] = "image/jxl";
+static const char s_mime_avif[] = "image/avif";
 static const char s_mime_png[] = "image/png";
 static const char s_mime_webp[] = "image/webp";
 static const char s_mime_jpg[] = "image/jpeg";
@@ -82,7 +84,7 @@ static const char s_mime_html[] = "text/html";
 		if (winpr_image_format_is_supported(WINPR_IMAGE_JPEG))
 			values.push_back(s_mime_jpg);
 
-		auto bmp = std::vector<const char*>({ s_mime_tiff, BMP_MIME_LIST });
+		auto bmp = std::vector<const char*>({ BMP_MIME_LIST });
 		values.insert(values.end(), bmp.begin(), bmp.end());
 	}
 	return values;
@@ -214,14 +216,15 @@ bool sdlClip::handleEvent(const SDL_ClipboardEvent& ev)
 
 	clearServerFormats();
 
-	std::string mime_html = s_mime_html;
+	const std::string mime_html = s_mime_html;
 
-	std::vector<std::string> mime_bitmap = { BMP_MIME_LIST };
-	std::string mime_webp = s_mime_webp;
-	std::string mime_png = s_mime_png;
-	std::string mime_jpeg = s_mime_jpg;
-	std::string mime_tiff = s_mime_tiff;
-	std::vector<std::string> mime_images = { mime_webp, mime_png, mime_jpeg, mime_tiff };
+	const std::vector<std::string> mime_bitmap = { BMP_MIME_LIST };
+	const std::string mime_webp = s_mime_webp;
+	const std::string mime_png = s_mime_png;
+	const std::string mime_jpeg = s_mime_jpg;
+	const std::string mime_tiff = s_mime_tiff;
+	const std::vector<std::string> mime_images = { mime_webp, mime_png,    mime_jpeg,
+		                                           mime_tiff, s_mime_avif, s_mime_jxl };
 
 	std::vector<std::string> clientFormatNames;
 	std::vector<CLIPRDR_FORMAT> clientFormats;
@@ -268,15 +271,23 @@ bool sdlClip::handleEvent(const SDL_ClipboardEvent& ev)
 				clientFormats.push_back({ CF_DIBV5, nullptr });
 #endif
 
-				for (auto& bmp : mime_bitmap)
-					clientFormatNames.push_back(bmp);
+				if (winpr_image_format_is_supported(WINPR_IMAGE_BITMAP))
+				{
+					for (auto& bmp : mime_bitmap)
+						clientFormatNames.push_back(bmp);
+				}
 
-				for (auto& img : mime_images)
-					clientFormatNames.push_back(img);
+				if (winpr_image_format_is_supported(WINPR_IMAGE_JPEG))
+					clientFormatNames.push_back(mime_jpeg);
+				if (winpr_image_format_is_supported(WINPR_IMAGE_WEBP))
+					clientFormatNames.push_back(mime_webp);
+				if (winpr_image_format_is_supported(WINPR_IMAGE_PNG))
+					clientFormatNames.push_back(mime_png);
 
 				clientFormatNames.emplace_back(s_type_HtmlFormat);
 				imgPushed = true;
 			}
+			clientFormatNames.push_back(local_mime);
 		}
 		else if (mime_is_file(local_mime))
 		{
@@ -287,6 +298,10 @@ bool sdlClip::handleEvent(const SDL_ClipboardEvent& ev)
 			}
 		}
 	}
+
+	std::sort(clientFormatNames.begin(), clientFormatNames.end());
+	clientFormatNames.erase(std::unique(clientFormatNames.begin(), clientFormatNames.end()),
+	                        clientFormatNames.end());
 
 	for (auto& name : clientFormatNames)
 	{
@@ -573,6 +588,17 @@ UINT sdlClip::ReceiveServerFormatList(CliprdrClientContext* context,
 	}
 	clipboard->_current_mimetypes.push_back(clipboard->_mime_uuid.c_str());
 
+	auto& mime = clipboard->_current_mimetypes;
+	std::sort(mime.begin(), mime.end());
+	mime.erase(std::unique(mime.begin(), mime.end()), mime.end());
+
+	WLog_Print(clipboard->_log, WLOG_TRACE,
+	           "-------------- server mime types [%" PRIuz "] ------------------", mime.size());
+	for (const auto& m : mime)
+	{
+		WLog_Print(clipboard->_log, WLOG_TRACE, "server announces %s]", m);
+	}
+
 	auto s = clipboard->_current_mimetypes.size();
 	SDL_Event ev = { SDL_EVENT_CLIPBOARD_UPDATE };
 	ev.clipboard.owner = true;
@@ -593,6 +619,31 @@ UINT sdlClip::ReceiveFormatListResponse(WINPR_ATTR_UNUSED CliprdrClientContext* 
 	if (formatListResponse->common.msgFlags & CB_RESPONSE_FAIL)
 		WLog_WARN(TAG, "format list update failed");
 	return CHANNEL_RC_OK;
+}
+
+[[nodiscard]]
+static const char* getCurrentTextMime()
+{
+
+	for (auto m : s_mime_text())
+	{
+		if (SDL_HasClipboardData(m))
+			return m;
+	}
+	return nullptr;
+}
+
+[[nodiscard]]
+static const char* getCurrentImageMime()
+{
+	const std::vector<const char*> types{ s_mime_jpg, s_mime_png,  s_mime_webp,  s_mime_avif,
+		                                  s_mime_jxl, s_mime_tiff, BMP_MIME_LIST };
+	for (const auto& m : types)
+	{
+		if (SDL_HasClipboardData(m))
+			return m;
+	}
+	return nullptr;
 }
 
 std::shared_ptr<BYTE> sdlClip::ReceiveFormatDataRequestHandle(
@@ -626,8 +677,10 @@ std::shared_ptr<BYTE> sdlClip::ReceiveFormatDataRequestHandle(
 		case CF_TEXT:
 		case CF_OEMTEXT:
 		case CF_UNICODETEXT:
-			localFormatId = ClipboardGetFormatId(clipboard->_system, mime_text_plain);
-			mime = mime_text_utf8;
+			mime = getCurrentTextMime();
+			if (!mime)
+				return {};
+			localFormatId = ClipboardGetFormatId(clipboard->_system, mime);
 			break;
 
 		case CF_DIB:
@@ -651,15 +704,9 @@ std::shared_ptr<BYTE> sdlClip::ReceiveFormatDataRequestHandle(
 				/* In case HTML format was requested but we only have images in local clipboard */
 				if (!SDL_HasClipboardData(s_mime_html))
 				{
-					for (const auto& cmime : s_mime_image())
-					{
-						if (SDL_HasClipboardData(cmime))
-						{
-							localFormatId = ClipboardGetFormatId(clipboard->_system, cmime);
-							mime = cmime;
-							break;
-						}
-					}
+					mime = getCurrentImageMime();
+					if (mime)
+						localFormatId = ClipboardGetFormatId(clipboard->_system, mime);
 				}
 				else
 				{
@@ -668,7 +715,17 @@ std::shared_ptr<BYTE> sdlClip::ReceiveFormatDataRequestHandle(
 				}
 			}
 			else
-				return data;
+			{
+				const char* formatName = ClipboardGetFormatName(clipboard->_system, formatId);
+				if (formatName && SDL_HasClipboardData(formatName))
+				{
+					localFormatId = ClipboardGetFormatId(clipboard->_system, formatName);
+					mime = formatName;
+				}
+				else
+					return data;
+			}
+			break;
 	}
 
 	{
@@ -751,8 +808,13 @@ UINT sdlClip::ReceiveFormatDataResponse(CliprdrClientContext* context,
 	std::scoped_lock lock(clipboard->_lock);
 	if (clipboard->_request_queue.empty())
 	{
-		WLog_Print(clipboard->_log, WLOG_ERROR, "no pending format request");
-		return ERROR_INTERNAL_ERROR;
+		/* The matching request already timed out (see the wait below) and was
+		 * popped, so this is a late reply on a slow/high-latency link. Dropping it
+		 * is harmless; returning an error here would kill the cliprdr channel thread
+		 * and tear down the whole session. Warn and continue instead. */
+		WLog_Print(clipboard->_log, WLOG_WARN,
+		           "format data response with no pending request (late reply?), ignoring");
+		return CHANNEL_RC_OK;
 	}
 
 	do
@@ -794,9 +856,15 @@ UINT sdlClip::ReceiveFormatDataResponse(CliprdrClientContext* context,
 						srcFormatId =
 						    ClipboardGetFormatId(clipboard->_system, s_type_FileGroupDescriptorW);
 
-						if (!cliprdr_file_context_update_server_data(
-						        clipboard->_file, clipboard->_system, data, size))
-							return ERROR_INTERNAL_ERROR;
+						if (cliprdr_file_context_has_local_support(clipboard->_file))
+						{
+							if (!cliprdr_file_context_update_server_data(
+							        clipboard->_file, clipboard->_system, data, size))
+							{
+								WLog_Print(clipboard->_log, WLOG_WARN,
+								           "File clipboard failed to update");
+							}
+						}
 					}
 					else if (name == s_type_HtmlFormat)
 					{
@@ -877,7 +945,9 @@ const void* sdlClip::ClipDataCb(void* userdata, const char* mime_type, size_t* s
 	{
 		HANDLE hdl[2] = { freerdp_abort_event(clip->_sdl->context()), clip->_event };
 
-		DWORD status = WaitForMultipleObjects(ARRAYSIZE(hdl), hdl, FALSE, 10 * 1000);
+		const UINT32 timeout =
+		    freerdp_settings_get_uint32(clip->_sdl->context()->settings, FreeRDP_TcpAckTimeout);
+		DWORD status = WaitForMultipleObjects(ARRAYSIZE(hdl), hdl, FALSE, timeout);
 
 		if (status != WAIT_OBJECT_0 + 1)
 		{

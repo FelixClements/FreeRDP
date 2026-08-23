@@ -23,6 +23,9 @@ cmake_minimum_required(VERSION 3.13)
 if(POLICY CMP0091)
   cmake_policy(SET CMP0091 NEW)
 endif()
+if(POLICY CMP0177)
+  cmake_policy(SET CMP0177 NEW)
+endif()
 project(FreeRDP LANGUAGES C)
 
 add_custom_target(fuzzers COMMENT "Build fuzzers")
@@ -239,17 +242,6 @@ add_compile_definitions(FREERDP_EXPORTS)
 
 # Mac OS X
 if(APPLE)
-  if(IOS)
-    if(NOT FREERDP_IOS_EXTERNAL_SSL_PATH)
-      message(
-        STATUS
-          "FREERDP_IOS_EXTERNAL_SSL_PATH not set! Required if openssl is not found in the iOS SDK (which usually isn't"
-      )
-    endif()
-    set(CMAKE_FIND_ROOT_PATH ${CMAKE_FIND_ROOT_PATH} ${FREERDP_IOS_EXTERNAL_SSL_PATH})
-    set_property(GLOBAL PROPERTY XCODE_ATTRIBUTE_SKIP_INSTALL YES)
-  endif(IOS)
-
   # Temporarily disabled, causes the cmake script to be reexecuted, causing the compilation to fail.
   # Workaround: specify the parameter in the command-line
   #	if(WITH_CLANG)
@@ -346,6 +338,10 @@ set(AOM_FEATURE_TYPE "OPTIONAL")
 set(AOM_FEATURE_PURPOSE "codec")
 set(AOM_FEATURE_DESCRIPTION "AOM AV1 encoder/decoder library")
 
+set(DAV1D_FEATURE_TYPE "OPTIONAL")
+set(DAV1D_FEATURE_PURPOSE "codec")
+set(DAV1D_FEATURE_DESCRIPTION "dav1d AV1 decoder library")
+
 set(YUV_FEATURE_TYPE "OPTIONAL")
 set(YUV_FEATURE_PURPOSE "codec")
 set(YUV_FEATURE_DESCRIPTION "YUV encoder/decoder library")
@@ -391,6 +387,10 @@ else()
   find_feature(MbedTLS ${MBEDTLS_FEATURE_TYPE} ${MBEDTLS_FEATURE_PURPOSE} ${MBEDTLS_FEATURE_DESCRIPTION})
 endif()
 
+option(WITH_TLS_DATA_LIMIT "Enforce TLS AEAD data limit (RFC 8446 5.5): rekey on TLS 1.3, cut if a TLS 1.3 rekey fails"
+       OFF
+)
+
 find_feature(PCSC ${PCSC_FEATURE_TYPE} ${PCSC_FEATURE_PURPOSE} ${PCSC_FEATURE_DESCRIPTION})
 
 if(WITH_DSP_FFMPEG OR WITH_VIDEO_FFMPEG OR WITH_FFMPEG)
@@ -404,6 +404,7 @@ find_feature(FAAD2 ${FAAD2_FEATURE_TYPE} ${FAAD2_FEATURE_PURPOSE} ${FAAD2_FEATUR
 find_feature(FAAC ${FAAC_FEATURE_TYPE} ${FAAC_FEATURE_PURPOSE} ${FAAC_FEATURE_DESCRIPTION})
 find_feature(soxr ${SOXR_FEATURE_TYPE} ${SOXR_FEATURE_PURPOSE} ${SOXR_FEATURE_DESCRIPTION})
 find_feature(aom ${AOM_FEATURE_TYPE} ${AOM_FEATURE_PURPOSE} ${AOM_FEATURE_DESCRIPTION})
+find_feature(dav1d ${DAV1D_FEATURE_TYPE} ${DAV1D_FEATURE_PURPOSE} ${DAV1D_FEATURE_DESCRIPTION})
 find_feature(yuv ${YUV_FEATURE_TYPE} ${YUV_FEATURE_PURPOSE} ${YUV_FEATURE_DESCRIPTION})
 
 option(WITH_OPENCL "[experimental] enable OpenCL support for primitives" OFF)

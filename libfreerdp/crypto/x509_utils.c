@@ -19,6 +19,8 @@
  * limitations under the License.
  */
 
+#include <ctype.h>
+
 #include <openssl/objects.h>
 #include <openssl/x509v3.h>
 #include <openssl/pem.h>
@@ -73,6 +75,7 @@ BYTE* x509_utils_get_hash(const X509* xcert, const char* hash, size_t* length)
 	return fp;
 }
 
+WINPR_ATTR_NODISCARD
 static char* crypto_print_name(const X509_NAME* name)
 {
 	char* buffer = nullptr;
@@ -107,6 +110,7 @@ static const char* general_name_type_labels[] = { "OTHERNAME", "EMAIL    ", "DNS
 	                                              "X400     ", "DIRNAME  ", "EDIPARTY ",
 	                                              "URI      ", "IPADD    ", "RID      " };
 
+WINPR_ATTR_NODISCARD
 static const char* general_name_type_label(int general_name_type)
 {
 	if ((0 <= general_name_type) &&
@@ -167,21 +171,18 @@ When the mapper returns 0, map_subject_alt_name stops the iteration immediately.
 
 #define GEN_ALL (-1)
 
-typedef int (*general_name_mapper_pr)(GENERAL_NAME* name, void* data, int index, int count);
+typedef int (*general_name_mapper_pr)(const X509* x509, GENERAL_NAME* name, void* data, int index,
+                                      int count);
 
 static void map_subject_alt_name(const X509* x509, int general_name_type,
                                  general_name_mapper_pr mapper, void* data)
 {
-	int num = 0;
-	STACK_OF(GENERAL_NAME)* gens = nullptr;
-	gens = X509_get_ext_d2i(x509, NID_subject_alt_name, nullptr, nullptr);
+	STACK_OF(GENERAL_NAME)* gens = X509_get_ext_d2i(x509, NID_subject_alt_name, nullptr, nullptr);
 
 	if (!gens)
-	{
 		return;
-	}
 
-	num = sk_GENERAL_NAME_num(gens);
+	const int num = sk_GENERAL_NAME_num(gens);
 
 	for (int i = 0; (i < num); i++)
 	{
@@ -191,7 +192,7 @@ static void map_subject_alt_name(const X509* x509, int general_name_type,
 		{
 			if ((general_name_type == GEN_ALL) || (general_name_type == name->type))
 			{
-				if (!mapper(name, data, i, num))
+				if (!mapper(x509, name, data, i, num))
 				{
 					break;
 				}
@@ -224,27 +225,39 @@ that must be freed with OPENSSL_free.
 typedef struct string_list
 {
 	char** strings;
+	size_t* lengths;
 	size_t allocated;
 	size_t count;
 	size_t maximum;
 } string_list;
 
-static void string_list_initialize(string_list* list)
+static string_list string_list_initialize(void)
 {
-	list->strings = nullptr;
-	list->allocated = 0;
-	list->count = 0;
-	list->maximum = INT_MAX;
+	const string_list empty = {
+		.strings = nullptr, .lengths = nullptr, .allocated = 0, .count = 0, .maximum = INT_MAX
+	};
+	return empty;
 }
 
-static void string_list_allocate(string_list* list, size_t allocate_count)
+static BOOL string_list_allocate(string_list* list, size_t allocate_count)
 {
-	if (!list->strings && list->allocated == 0)
+	WINPR_ASSERT(list);
+	if (!list->strings && (list->allocated == 0) && (allocate_count > 0))
 	{
 		list->strings = (char**)calloc(allocate_count, sizeof(char*));
-		list->allocated = list->strings ? allocate_count : 0;
+		list->lengths = calloc(allocate_count, sizeof(size_t));
 		list->count = 0;
+		if (!list->strings || !list->lengths)
+		{
+			free((void*)list->strings);
+			free(list->lengths);
+			list->strings = nullptr;
+			list->lengths = nullptr;
+			return FALSE;
+		}
+		list->allocated = allocate_count;
 	}
+	return TRUE;
 }
 
 static void string_list_free(string_list* list)
@@ -253,16 +266,113 @@ static void string_list_free(string_list* list)
 	/* is handled by the caller,  either by returning this */
 	/* content,  or freeing it itself. */
 	free((void*)list->strings);
+	free(list->lengths);
 }
 
-static int extract_string(GENERAL_NAME* name, void* data, int index, int count)
+WINPR_ATTR_NODISCARD
+static BOOL check_string_is_email(WINPR_ATTR_UNUSED const X509* x509, const unsigned char* ustr,
+                                  size_t length)
+{
+	const size_t MAX_EMAIL_LENGTH = 256;
+	const size_t MIN_EMAIL_LENGTH = 5;
+
+	if (ustr == nullptr)
+		return FALSE;
+
+	const char* email = (const char*)ustr;
+	const size_t len = strnlen(email, length);
+	if ((len < MIN_EMAIL_LENGTH) || (len > MAX_EMAIL_LENGTH))
+		return FALSE;
+
+	size_t at_pos = 0;
+	size_t at_count = 0;
+
+	for (size_t i = 0; i < len; i++)
+	{
+		char cur = email[i];
+		if (cur == '@')
+		{
+			/* @ must not be first or last */
+			if (i == 0)
+				return FALSE;
+			if (i == len - 1)
+				return FALSE;
+			at_pos = i;
+			at_count++;
+		}
+		if (isspace(cur))
+			return FALSE;
+	}
+
+	/* only one @ allowed */
+	if (at_count != 1)
+	{
+		return FALSE;
+	}
+
+	/* local part */
+	if ((email[0] == '.') || (email[at_pos - 1] == '.'))
+		return FALSE;
+
+	/* .. forbidden */
+	for (size_t i = 0; i < at_pos - 1; i++)
+	{
+		if ((email[i] == '.') && (email[i + 1] == '.'))
+			return FALSE;
+	}
+
+	// Validate the domain part (after '@')
+	const char* domain = &email[at_pos + 1];
+	size_t domain_len = strnlen(domain, len);
+
+	if (!winpr_str_is_valid_urlN(domain, domain_len))
+		return FALSE;
+
+	/* local part */
+	for (size_t i = 0; i < at_pos; i++)
+	{
+		if (!isalnum(email[i]) && email[i] != '.' && email[i] != '-' && email[i] != '_' &&
+		    email[i] != '+')
+		{
+			return FALSE;
+		}
+	}
+
+	return TRUE;
+}
+
+WINPR_ATTR_NODISCARD
+static BOOL check_string_is_host_or_ip(WINPR_ATTR_UNUSED const X509* x509,
+                                       const unsigned char* ustr, size_t length)
+{
+	const char* str = (const char*)ustr;
+	if (strnlen(str, length) != length)
+		return FALSE;
+	return winpr_str_is_valid_urlN(str, length);
+}
+
+WINPR_ATTR_NODISCARD
+static BOOL check_string_is_host_or_ip_or_email(WINPR_ATTR_UNUSED const X509* x509,
+                                                const unsigned char* ustr, size_t length)
+{
+	if (check_string_is_host_or_ip(x509, ustr, length))
+		return TRUE;
+	return check_string_is_email(x509, ustr, length);
+}
+
+WINPR_ATTR_NODISCARD
+static int
+extract_string_generic(const X509* x509, GENERAL_NAME* name, void* data, int index, int count,
+                       BOOL (*fkt)(const X509* x509, const unsigned char* str, size_t length))
 {
 	string_list* list = data;
-	unsigned char* cstring = nullptr;
-	ASN1_STRING* str = nullptr;
+	WINPR_ASSERT(list);
+	WINPR_ASSERT(fkt);
 
+	WINPR_ASSERT(name);
 	WINPR_UNUSED(index);
 
+	const ASN1_STRING* str = nullptr;
 	switch (name->type)
 	{
 		case GEN_URI:
@@ -281,30 +391,55 @@ static int extract_string(GENERAL_NAME* name, void* data, int index, int count)
 			return 1;
 	}
 
-	if ((ASN1_STRING_to_UTF8(&cstring, str)) < 0)
+	unsigned char* cstring = nullptr;
+	const int rc = ASN1_STRING_to_UTF8(&cstring, str);
+	if (rc < 0)
 	{
 		WLog_ERR(TAG, "ASN1_STRING_to_UTF8() failed for %s: %s",
 		         general_name_type_label(name->type), ERR_error_string(ERR_get_error(), nullptr));
 		return 1;
 	}
 
-	string_list_allocate(list, WINPR_ASSERTING_INT_CAST(WINPR_CIPHER_TYPE, count));
-
-	if (list->allocated <= 0)
+	if (!fkt(x509, cstring, WINPR_ASSERTING_INT_CAST(size_t, rc)))
 	{
+		WLog_ERR(TAG, "ASN1_STRING_to_UTF8() does not conform to expected format %s: %s",
+		         general_name_type_label(name->type), (const char*)str);
+		OPENSSL_free(cstring);
+		return -1;
+	}
+
+	if (!string_list_allocate(list, WINPR_ASSERTING_INT_CAST(WINPR_CIPHER_TYPE, count)) ||
+	    (list->allocated <= 0))
+	{
+		WLog_ERR(TAG, "ASN1_STRING_to_UTF8() allocation failed: %s",
+		         general_name_type_label(name->type));
 		OPENSSL_free(cstring);
 		return 0;
 	}
 
 	list->strings[list->count] = (char*)cstring;
+	list->lengths[list->count] = WINPR_ASSERTING_INT_CAST(size_t, rc);
 	list->count++;
 
 	if (list->count >= list->maximum)
 	{
+		WLog_ERR(TAG, "ASN1_STRING_to_UTF8() limit exceeded: %s",
+		         general_name_type_label(name->type));
 		return 0;
 	}
 
 	return 1;
+}
+
+WINPR_ATTR_NODISCARD
+static int extract_string(const X509* x509, GENERAL_NAME* name, void* data, int index, int count)
+{
+	return extract_string_generic(x509, name, data, index, count, check_string_is_host_or_ip);
+}
+
+static int extract_email(const X509* x509, GENERAL_NAME* name, void* data, int index, int count)
+{
+	return extract_string_generic(x509, name, data, index, count, check_string_is_email);
 }
 
 /*
@@ -329,44 +464,71 @@ typedef struct object_list
 {
 	ASN1_OBJECT* type_id;
 	char** strings;
+	size_t* lengths;
+
 	size_t allocated;
 	size_t count;
 	size_t maximum;
 } object_list;
 
-static void object_list_initialize(object_list* list)
+static object_list object_list_initialize(void)
 {
-	list->type_id = nullptr;
-	list->strings = nullptr;
-	list->allocated = 0;
-	list->count = 0;
-	list->maximum = INT_MAX;
+	const object_list empty = { .type_id = nullptr,
+		                        .strings = nullptr,
+		                        .lengths = nullptr,
+		                        .allocated = 0,
+		                        .count = 0,
+		                        .maximum = INT_MAX };
+	return empty;
 }
 
-static void object_list_allocate(object_list* list, size_t allocate_count)
+WINPR_ATTR_NODISCARD
+static BOOL object_list_allocate(object_list* list, size_t allocate_count)
 {
 	if (!list->strings && (list->allocated == 0) && (allocate_count > 0))
 	{
 		list->strings = (char**)calloc(allocate_count, sizeof(list->strings[0]));
-		list->allocated = list->strings ? allocate_count : 0;
+		list->lengths = calloc(allocate_count, sizeof(size_t));
 		list->count = 0;
+		if (!list->strings || !list->lengths)
+		{
+			free((void*)list->strings);
+			free(list->lengths);
+			list->strings = nullptr;
+			list->lengths = nullptr;
+			return FALSE;
+		}
+		list->allocated = allocate_count;
 	}
+	return TRUE;
 }
 
-static char* object_string(ASN1_TYPE* object)
+WINPR_ATTR_MALLOC(free, 1)
+static char* object_string(const X509* x509, ASN1_TYPE* object, size_t* pLength)
 {
-	char* result = nullptr;
 	unsigned char* utf8String = nullptr;
+
+	WINPR_ASSERT(object);
+	WINPR_ASSERT(pLength);
+
+	*pLength = 0;
 
 	/* TODO: check that object.type is a string type. */
 	const int length = ASN1_STRING_to_UTF8(&utf8String, object->value.asn1_string);
 
 	if (length < 0)
-	{
 		return nullptr;
-	}
 
-	result = strndup((char*)utf8String, WINPR_ASSERTING_INT_CAST(size_t, length));
+	char* result = nullptr;
+	if (check_string_is_host_or_ip_or_email(x509, utf8String,
+	                                        WINPR_ASSERTING_INT_CAST(size_t, length)))
+	{
+		result = strndup((char*)utf8String, WINPR_ASSERTING_INT_CAST(size_t, length));
+		if (result)
+			*pLength = WINPR_ASSERTING_INT_CAST(size_t, length);
+	}
+	else
+		WLog_ERR(TAG, "Found invalid object_string entry in certificate: '%s'", utf8String);
 	OPENSSL_free(utf8String);
 	return result;
 }
@@ -375,12 +537,16 @@ static void object_list_free(object_list* list)
 {
 	WINPR_ASSERT(list);
 	free((void*)list->strings);
+	free(list->lengths);
 }
 
-static int extract_othername_object_as_string(GENERAL_NAME* name, void* data, int index, int count)
+WINPR_ATTR_NODISCARD
+static int extract_othername_object_as_string(const X509* x509, GENERAL_NAME* name, void* data,
+                                              int index, int count)
 {
 	object_list* list = data;
 	WINPR_UNUSED(index);
+	WINPR_ASSERT(x509);
 
 	if (count < 0)
 		return -1;
@@ -395,15 +561,14 @@ static int extract_othername_object_as_string(GENERAL_NAME* name, void* data, in
 		return 1;
 	}
 
-	object_list_allocate(list, WINPR_ASSERTING_INT_CAST(size_t, count));
-
-	if (list->allocated <= 0)
+	if (!object_list_allocate(list, WINPR_ASSERTING_INT_CAST(size_t, count)) ||
+	    (list->allocated <= 0))
 	{
 		return 0;
 	}
 
-	list->strings[list->count] = object_string(name->d.otherName->value);
-
+	list->strings[list->count] =
+	    object_string(x509, name->d.otherName->value, &list->lengths[list->count]);
 	if (list->strings[list->count])
 	{
 		list->count++;
@@ -419,11 +584,9 @@ static int extract_othername_object_as_string(GENERAL_NAME* name, void* data, in
 
 char* x509_utils_get_email(const X509* x509)
 {
-	char* result = nullptr;
-	string_list list;
-	string_list_initialize(&list);
+	string_list list = string_list_initialize();
 	list.maximum = 1;
-	map_subject_alt_name(x509, GEN_EMAIL, extract_string, &list);
+	map_subject_alt_name(x509, GEN_EMAIL, extract_email, &list);
 
 	if (list.count == 0)
 	{
@@ -431,7 +594,7 @@ char* x509_utils_get_email(const X509* x509)
 		return nullptr;
 	}
 
-	result = _strdup(list.strings[0]);
+	char* result = strndup(list.strings[0], list.lengths[0]);
 	OPENSSL_free(list.strings[0]);
 	string_list_free(&list);
 	return result;
@@ -439,9 +602,8 @@ char* x509_utils_get_email(const X509* x509)
 
 char* x509_utils_get_upn(const X509* x509)
 {
-	char* result = nullptr;
-	object_list list = WINPR_C_ARRAY_INIT;
-	object_list_initialize(&list);
+	object_list list = object_list_initialize();
+
 	list.type_id = OBJ_nid2obj(NID_ms_upn);
 	list.maximum = 1;
 	map_subject_alt_name(x509, GEN_OTHERNAME, extract_othername_object_as_string, &list);
@@ -452,7 +614,7 @@ char* x509_utils_get_upn(const X509* x509)
 		return nullptr;
 	}
 
-	result = list.strings[0];
+	char* result = list.strings[0];
 	object_list_free(&list);
 	return result;
 }
@@ -504,9 +666,7 @@ void x509_utils_dns_names_free(size_t count, size_t* lengths, char** dns_names)
 
 char** x509_utils_get_dns_names(const X509* xcert, size_t* count, size_t** lengths)
 {
-	char** result = nullptr;
-	string_list list = WINPR_C_ARRAY_INIT;
-	string_list_initialize(&list);
+	string_list list = string_list_initialize();
 	map_subject_alt_name(xcert, GEN_DNS, extract_string, &list);
 	(*count) = list.count;
 
@@ -518,7 +678,7 @@ char** x509_utils_get_dns_names(const X509* xcert, size_t* count, size_t** lengt
 
 	/* lengths are not useful,  since we converted the
 	   strings to utf-8,  there cannot be nul-bytes in them. */
-	result = (char**)calloc(list.count, sizeof(*result));
+	char** result = (char**)calloc(list.count, sizeof(*result));
 	(*lengths) = calloc(list.count, sizeof(**lengths));
 
 	if (!result || !(*lengths))
@@ -534,7 +694,7 @@ char** x509_utils_get_dns_names(const X509* xcert, size_t* count, size_t** lengt
 	for (size_t i = 0; i < list.count; i++)
 	{
 		result[i] = list.strings[i];
-		(*lengths)[i] = strlen(result[i]);
+		(*lengths)[i] = list.lengths[i];
 	}
 
 	string_list_free(&list);
@@ -555,6 +715,7 @@ char* x509_utils_get_issuer(const X509* xcert)
 	return issuer;
 }
 
+WINPR_ATTR_NODISCARD
 static int asn1_object_cmp(const ASN1_OBJECT* const* a, const ASN1_OBJECT* const* b)
 {
 	if (!a || !b)
@@ -593,12 +754,9 @@ BOOL x509_utils_check_eku(const X509* xcert, int nid)
 
 void x509_utils_print_info(const X509* xcert)
 {
-	char* fp = nullptr;
-	char* issuer = nullptr;
-	char* subject = nullptr;
-	subject = x509_utils_get_subject(xcert);
-	issuer = x509_utils_get_issuer(xcert);
-	fp = (char*)x509_utils_get_hash(xcert, "sha256", nullptr);
+	char* subject = x509_utils_get_subject(xcert);
+	char* issuer = x509_utils_get_issuer(xcert);
+	char* fp = (char*)x509_utils_get_hash(xcert, "sha256", nullptr);
 
 	if (!fp)
 	{
@@ -622,7 +780,6 @@ out_free_issuer:
 
 X509* x509_utils_from_pem(const char* data, size_t len, BOOL fromFile)
 {
-	X509* x509 = nullptr;
 	BIO* bio = nullptr;
 	if (fromFile)
 		bio = BIO_new_file(data, "rb");
@@ -640,7 +797,7 @@ X509* x509_utils_from_pem(const char* data, size_t len, BOOL fromFile)
 		return nullptr;
 	}
 
-	x509 = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+	X509* x509 = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
 	BIO_free_all(bio);
 	if (!x509)
 		WLog_ERR(TAG, "PEM_read_bio_X509 returned nullptr [input length %" PRIuz "]", len);
@@ -648,6 +805,7 @@ X509* x509_utils_from_pem(const char* data, size_t len, BOOL fromFile)
 	return x509;
 }
 
+WINPR_ATTR_NODISCARD
 static WINPR_MD_TYPE hash_nid_to_winpr(int hash_nid)
 {
 	switch (hash_nid)
@@ -690,6 +848,7 @@ static WINPR_MD_TYPE hash_nid_to_winpr(int hash_nid)
 	}
 }
 
+WINPR_ATTR_NODISCARD
 static WINPR_MD_TYPE get_rsa_pss_digest(const X509_ALGOR* alg)
 {
 	WINPR_MD_TYPE ret = WINPR_MD_NONE;
@@ -795,7 +954,7 @@ WINPR_MD_TYPE x509_utils_get_signature_alg(const X509* xcert)
 
 char* x509_utils_get_common_name(const X509* xcert, size_t* plength)
 {
-	X509_NAME* subject_name = X509_get_subject_name(xcert);
+	const X509_NAME* subject_name = X509_get_subject_name(xcert);
 	if (subject_name == nullptr)
 		return nullptr;
 
@@ -816,14 +975,20 @@ char* x509_utils_get_common_name(const X509* xcert, size_t* plength)
 	if (length < 0)
 		return nullptr;
 
-	if (plength)
-		*plength = (size_t)length;
+	char* common_name = nullptr;
+	if (check_string_is_host_or_ip(xcert, common_name_raw,
+	                               WINPR_ASSERTING_INT_CAST(size_t, length)))
+	{
+		if (plength)
+			*plength = (size_t)length;
 
-	char* common_name = _strdup((char*)common_name_raw);
+		common_name = strndup((char*)common_name_raw, (size_t)length);
+	}
 	OPENSSL_free(common_name_raw);
 	return common_name;
 }
 
+WINPR_ATTR_NODISCARD
 static int verify_cb(int ok, X509_STORE_CTX* csc)
 {
 	if (ok != 1)
@@ -846,10 +1011,8 @@ static int verify_cb(int ok, X509_STORE_CTX* csc)
 
 BOOL x509_utils_verify(X509* xcert, STACK_OF(X509) * chain, const char* certificate_store_path)
 {
-	const int purposes[3] = { X509_PURPOSE_SSL_SERVER, X509_PURPOSE_SSL_CLIENT, X509_PURPOSE_ANY };
-	X509_STORE_CTX* csc = nullptr;
+	const int purposes[] = { X509_PURPOSE_SSL_SERVER };
 	BOOL status = FALSE;
-	X509_LOOKUP* lookup = nullptr;
 
 	if (!xcert)
 		return FALSE;
@@ -870,7 +1033,7 @@ BOOL x509_utils_verify(X509* xcert, STACK_OF(X509) * chain, const char* certific
 	if (X509_STORE_set_default_paths(cert_ctx) != 1)
 		goto end;
 
-	lookup = X509_STORE_add_lookup(cert_ctx, X509_LOOKUP_hash_dir());
+	X509_LOOKUP* lookup = X509_STORE_add_lookup(cert_ctx, X509_LOOKUP_hash_dir());
 
 	if (lookup == nullptr)
 		goto end;
@@ -889,7 +1052,7 @@ BOOL x509_utils_verify(X509* xcert, STACK_OF(X509) * chain, const char* certific
 		int err = -1;
 		int rc = -1;
 		int purpose = purposes[i];
-		csc = X509_STORE_CTX_new();
+		X509_STORE_CTX* csc = X509_STORE_CTX_new();
 
 		if (csc == nullptr)
 			goto skip;

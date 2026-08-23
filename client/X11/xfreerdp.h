@@ -171,6 +171,7 @@ struct xf_context
 	xfAppWindow* appWindow;
 	xfPointer* pointer;
 	xfWorkArea workArea;
+	xfWorkArea railWorkArea;
 	xfFullscreenMonitors fullscreenMonitors;
 	int current_desktop;
 	BOOL remote_app;
@@ -401,7 +402,8 @@ enum XF_EXIT_CODE
 	XF_EXIT_CONNECT_LOGON_TYPE_NOT_GRANTED = 158,
 	XF_EXIT_CONNECT_NO_OR_MISSING_CREDENTIALS = 159,
 	XF_EXIT_CONNECT_TARGET_BOOTING = 160,
-	XF_EXIT_CODE_LAST = XF_EXIT_CONNECT_TARGET_BOOTING,
+	XF_EXIT_CONNECT_HYBRID_REQUIRED_BY_SERVER = 161,
+	XF_EXIT_CODE_LAST = XF_EXIT_CONNECT_HYBRID_REQUIRED_BY_SERVER,
 	XF_EXIT_UNKNOWN = 255,
 };
 

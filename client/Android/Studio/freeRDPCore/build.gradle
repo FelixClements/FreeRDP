@@ -7,52 +7,35 @@ android {
     defaultConfig {
         minSdkVersion rootProject.ext.minApi
         targetSdkVersion rootProject.ext.targetApi
-        ndkVersion = "29.0.13113456"
+        ndkVersion = rootProject.ext.ndkVersion
 
         ndk {
             //noinspection ChromeOsAbiSupport
-            abiFilters "arm64-v8a", "armeabi-v7a", "x86_64", "x86"
+            abiFilters rootProject.ext.abiFilters
         }
         externalNativeBuild {
             cmake {
-                arguments "-DWITH_FFMPEG=ON", "-DWITH_OPENH264=ON",
-                        "-DWITH_OPUS=ON",   "-DWITH_WEBP=ON",
-                        "-DWITH_JPEG=ON",   "-DWITH_PNG=ON",
-                        "-DWITH_CJSON=ON",  "-DWITH_OPENSSL=ON"
+                arguments rootProject.ext.cmakeArguments
             }
         }
     }
 
     splits {
         abi {
-            enable true
+            enable rootProject.ext.splitEnabled
             reset()
-            include 'x86', 'x86_64', 'armeabi-v7a', 'arm64-v8a'
-            universalApk true
+            include rootProject.ext.splitArchs
+            universalApk rootProject.ext.universal
         }
     }
 
     buildTypes {
         release {
             minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.txt'
-            externalNativeBuild {
-                cmake {
-                    abiFilters "arm64-v8a", "armeabi-v7a", "x86_64", "x86"
-                }
-            }
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.txt'
         }
         debug {
             jniDebuggable true
-            externalNativeBuild {
-                cmake {
-                    abiFilters "arm64-v8a", "armeabi-v7a", "x86_64", "x86"
-                    arguments "-DWITH_FFMPEG=OFF", "-DWITH_OPENH264=ON",
-                            "-DWITH_OPUS=OFF",   "-DWITH_WEBP=OFF",
-                            "-DWITH_JPEG=OFF",   "-DWITH_PNG=OFF",
-                            "-DWITH_CJSON=OFF",  "-DWITH_OPENSSL=ON"
-                }
-            }
         }
         qa {
             jniDebuggable false
@@ -77,22 +60,22 @@ android {
     externalNativeBuild {
         cmake {
             path file('src/main/cpp/CMakeLists.txt')
-            version '4.1.2'
+            version rootProject.ext.cmakeVersion
         }
     }
 }
 
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.7.1'
-    implementation 'androidx.core:core:1.18.0'
+    implementation 'androidx.core:core:1.19.0'
     implementation 'androidx.preference:preference:1.2.1'
     implementation 'androidx.recyclerview:recyclerview:1.4.0'
-    implementation 'androidx.lifecycle:lifecycle-viewmodel:2.10.0'
-    implementation 'androidx.lifecycle:lifecycle-livedata:2.10.0'
+    implementation 'androidx.lifecycle:lifecycle-viewmodel:2.11.0'
+    implementation 'androidx.lifecycle:lifecycle-livedata:2.11.0'
 
     implementation "androidx.room:room-runtime:2.8.4"
     annotationProcessor "androidx.room:room-compiler:2.8.4"
 
-    implementation 'net.zetetic:sqlcipher-android:4.16.0@aar'
-    implementation 'androidx.sqlite:sqlite:2.6.2'
+    implementation 'net.zetetic:sqlcipher-android:4.17.0@aar'
+    implementation 'androidx.sqlite:sqlite:2.7.0'
 }

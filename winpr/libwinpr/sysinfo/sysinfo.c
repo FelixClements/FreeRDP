@@ -103,8 +103,7 @@ static UINT64 mac_get_time_ns(void)
 #include <winpr/crt.h>
 #include <winpr/platform.h>
 
-#if defined(__MACOSX__) || defined(__IOS__) || defined(__FreeBSD__) || defined(__NetBSD__) || \
-    defined(__OpenBSD__) || defined(__DragonFly__)
+#if defined(__MACOSX__) || defined(__IOS__)
 #include <sys/sysctl.h>
 #endif
 
@@ -137,6 +136,29 @@ static WORD GetProcessorArchitecture(void)
 		default:
 			return PROCESSOR_ARCHITECTURE_UNKNOWN;
 	}
+#elif defined(__MACOSX__) || defined(__IOS__)
+	int32_t val = 0;
+	size_t len = sizeof(val);
+
+	const int rc = sysctlbyname("hw.cputype", &val, &len, nullptr, 0);
+	if (rc != 0)
+		return PROCESSOR_ARCHITECTURE_UNKNOWN;
+
+	switch (val)
+	{
+		case CPU_TYPE_X86:
+			return PROCESSOR_ARCHITECTURE_INTEL;
+		case CPU_TYPE_X86_64:
+			return PROCESSOR_ARCHITECTURE_AMD64;
+		case CPU_TYPE_ARM:
+			return PROCESSOR_ARCHITECTURE_ARM;
+		case CPU_TYPE_ARM64:
+			return PROCESSOR_ARCHITECTURE_ARM64;
+		case CPU_TYPE_ARM64_32:
+			return PROCESSOR_ARCHITECTURE_ARM;
+		default:
+			return PROCESSOR_ARCHITECTURE_UNKNOWN;
+	}
 
 #elif defined(_M_ARM)
 	cpuArch = PROCESSOR_ARCHITECTURE_ARM;
@@ -166,35 +188,18 @@ static DWORD GetNumberOfProcessors(void)
 	DWORD numCPUs = 1;
 #if defined(ANDROID)
 	return android_getCpuCount();
-	/* TODO: iOS */
-#elif defined(__linux__) || defined(__sun) || defined(_AIX)
-	numCPUs = (DWORD)sysconf(_SC_NPROCESSORS_ONLN);
-#elif defined(__MACOSX__) || defined(__FreeBSD__) || defined(__NetBSD__) || \
-    defined(__OpenBSD__) || defined(__DragonFly__)
-	{
-		int mib[4];
-		size_t length = sizeof(numCPUs);
-		mib[0] = CTL_HW;
-#if defined(__FreeBSD__) || defined(__OpenBSD__)
-		mib[1] = HW_NCPU;
-#else
-		mib[1] = HW_AVAILCPU;
-#endif
-		sysctl(mib, 2, &numCPUs, &length, nullptr, 0);
-
-		if (numCPUs < 1)
-		{
-			mib[1] = HW_NCPU;
-			sysctl(mib, 2, &numCPUs, &length, nullptr, 0);
-
-			if (numCPUs < 1)
-				numCPUs = 1;
-		}
-	}
+#elif defined(__MACOSX__) || defined(__IOS__)
+	int32_t val = 0;
+	size_t len = sizeof(val);
+	const int rc = sysctlbyname("hw.logicalcpu", &val, &len, nullptr, 0);
+	if (rc == 0)
+		numCPUs = WINPR_ASSERTING_INT_CAST(DWORD, val);
 #elif defined(__hpux)
 	numCPUs = (DWORD)mpctl(MPC_GETNUMSPUS, nullptr, nullptr);
 #elif defined(__sgi)
 	numCPUs = (DWORD)sysconf(_SC_NPROC_ONLN);
+#elif defined(_SC_NPROCESSORS_ONLN)
+	numCPUs = (DWORD)sysconf(_SC_NPROCESSORS_ONLN);
 #endif
 	return numCPUs;
 }
@@ -327,8 +332,10 @@ BOOL GetSystemTimeAdjustment(WINPR_ATTR_UNUSED PDWORD lpTimeAdjustment,
 	return FALSE;
 }
 
-#ifndef CLOCK_MONOTONIC_RAW
-#define CLOCK_MONOTONIC_RAW 4
+#ifdef CLOCK_MONOTONIC_RAW
+#define CLOCK_ID CLOCK_MONOTONIC_RAW
+#else
+#define CLOCK_ID CLOCK_MONOTONIC
 #endif
 
 DWORD GetTickCount(void)
@@ -586,7 +593,7 @@ UINT64 winpr_GetTickCount64NS(void)
 #if defined(_POSIX_C_SOURCE) && (_POSIX_C_SOURCE >= 199309L)
 	struct timespec ts = WINPR_C_ARRAY_INIT;
 
-	if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) == 0)
+	if (clock_gettime(CLOCK_ID, &ts) == 0)
 		ticks = (WINPR_ASSERTING_INT_CAST(uint64_t, ts.tv_sec) * 1000000000ull) +
 		        WINPR_ASSERTING_INT_CAST(uint64_t, ts.tv_nsec);
 #elif defined(__MACH__) && defined(__APPLE__)

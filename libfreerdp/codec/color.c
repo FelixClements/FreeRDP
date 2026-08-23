@@ -460,10 +460,10 @@ BOOL freerdp_image_copy_from_icon_data(BYTE* WINPR_RESTRICT pDstData, UINT32 Dst
 	}
 
 	/* Ensure we have enough source data bytes for image copy. */
-	if (cbBitsColor / nHeight < FreeRDPGetBytesPerPixel(format) * nWidth)
+	if ((1ul * cbBitsColor) / nHeight < (1ul * FreeRDPGetBytesPerPixel(format) * nWidth))
 	{
 		WLog_ERR(TAG,
-		         "cbBitsColor{%" PRIu32 "} < nWidth{%" PRIu32 "} * nHeight{%" PRIu32
+		         "cbBitsColor{%" PRIu16 "} < nWidth{%" PRIu16 "} * nHeight{%" PRIu16
 		         "} * bpp{%" PRIu32 "}",
 		         cbBitsColor, nWidth, nHeight, FreeRDPGetBytesPerPixel(format));
 		return FALSE;
@@ -1010,6 +1010,9 @@ BOOL freerdp_image_copy_overlap(BYTE* pDstData, DWORD DstFormat, UINT32 nDstStep
 	int64_t srcVMultiplier = 1;
 	int64_t dstVOffset = 0;
 	int64_t dstVMultiplier = 1;
+
+	if ((nWidth == 0) || (nHeight == 0))
+		return TRUE;
 
 	if (FreeRDPGetBitsPerPixel(SrcFormat) == 0)
 		return FALSE;
@@ -1974,6 +1977,9 @@ BOOL freerdp_image_copy_no_overlap(BYTE* WINPR_RESTRICT pDstData, DWORD DstForma
 		return FALSE;
 	if (FreeRDPGetBitsPerPixel(DstFormat) == 0)
 		return FALSE;
+
+	if ((nWidth == 0) || (nHeight == 0))
+		return TRUE;
 
 	WINPR_ASSERT(1ull * nXDst + nWidth <= UINT32_MAX);
 	WINPR_ASSERT(1ull * nXSrc + nWidth <= UINT32_MAX);

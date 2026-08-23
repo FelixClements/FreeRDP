@@ -19,6 +19,7 @@
  * limitations under the License.
  */
 
+#include <winpr/wtypes.h>
 #include <freerdp/config.h>
 
 #include "settings.h"
@@ -41,8 +42,62 @@
 #define logonInfoV2ReservedSize 558u
 #define logonInfoV2TotalSize (logonInfoV2Size + logonInfoV2ReservedSize)
 
-static const char* INFO_TYPE_LOGON_STRINGS[4] = { "Logon Info V1", "Logon Info V2",
-	                                              "Logon Plain Notify", "Logon Extended Info" };
+const char* freerdp_session_logon_type_str(uint32_t type)
+{
+	switch (type)
+	{
+		case INFO_TYPE_LOGON:
+			return "Logon Info V1";
+		case INFO_TYPE_LOGON_LONG:
+			return "Logon Info V2";
+		case INFO_TYPE_LOGON_PLAIN_NOTIFY:
+			return "Logon Plain Notify";
+		case INFO_TYPE_LOGON_EXTENDED_INF:
+			return "Logon Extended Info";
+		default:
+			return "INFO_TYPE_UNKNOWN";
+	}
+}
+
+const char* freerdp_session_logon_type_data_str(uint32_t type, const void* data, char* buffer,
+                                                size_t length)
+{
+	switch (type)
+	{
+		case INFO_TYPE_LOGON:
+		case INFO_TYPE_LOGON_LONG:
+		{
+			const logon_info* logonInfo = data;
+			if (!logonInfo)
+				(void)_snprintf(buffer, length, "<INVALID DATA>");
+			else
+				(void)_snprintf(buffer, length, "%s\\%s [%" PRIu32 "]", logonInfo->domain,
+				                logonInfo->username, logonInfo->sessionId);
+		}
+		break;
+		case INFO_TYPE_LOGON_PLAIN_NOTIFY:
+			(void)_snprintf(buffer, length, "");
+			break;
+		case INFO_TYPE_LOGON_EXTENDED_INF:
+		{
+			const logon_info_ex* logonInfo = data;
+			if (!logonInfo)
+				(void)_snprintf(buffer, length, "<INVALID DATA>");
+			else
+				(void)_snprintf(buffer, length,
+				                "cookie: %s, LogonId: %" PRIu32
+				                ", errorInfo: %s, notifyType: %" PRIu32 ", notifyData: %" PRIu32,
+				                logonInfo->haveCookie ? "TRUE" : "FALSE", logonInfo->LogonId,
+				                logonInfo->haveErrorInfo ? "TRUE" : "FALSE",
+				                logonInfo->ErrorNotificationType, logonInfo->ErrorNotificationData);
+		}
+		break;
+		default:
+			(void)_snprintf(buffer, length, "<INVALID TYPE>");
+			break;
+	}
+	return buffer;
+}
 
 /* This define limits the length of the strings in the label field. */
 #define MAX_LABEL_LENGTH 40
@@ -573,12 +628,19 @@ static BOOL rdp_write_extended_info_packet(rdpRdp* rdp, wStream* s)
 		Stream_Write_UINT16(s, 0); /* reserved1 (2 bytes) */
 		Stream_Write_UINT16(s, 0); /* reserved2 (2 bytes) */
 
+		size_t rstrlen = 0;
 		size_t rlen = 0;
 		const char* tz = freerdp_settings_get_string(settings, FreeRDP_DynamicDSTTimeZoneKeyName);
 		if (tz)
-			rlen = strnlen(tz, 254);
+		{
+			rstrlen = strnlen(tz, 254);
+			const SSIZE_T wlen = ConvertUtf8NToWChar(tz, rstrlen, nullptr, 0);
+			if (wlen < 0)
+				goto fail;
+			rlen = WINPR_ASSERTING_INT_CAST(size_t, wlen);
+		}
 		Stream_Write_UINT16(s, (UINT16)rlen * sizeof(WCHAR));
-		if (Stream_Write_UTF16_String_From_UTF8(s, rlen, tz, rlen, FALSE) < 0)
+		if (Stream_Write_UTF16_String_From_UTF8(s, rlen, tz, rstrlen, FALSE) < 0)
 			goto fail;
 		Stream_Write_UINT16(s, settings->DynamicDaylightTimeDisabled ? 0x01 : 0x00);
 	}
@@ -1344,9 +1406,8 @@ static BOOL rdp_recv_logon_info_extended(rdpRdp* rdp, wStream* s, logon_info_ex*
 BOOL rdp_recv_save_session_info(rdpRdp* rdp, wStream* s)
 {
 	UINT32 infoType = 0;
-	BOOL status = 0;
-	logon_info logonInfo = WINPR_C_ARRAY_INIT;
-	logon_info_ex logonInfoEx = WINPR_C_ARRAY_INIT;
+	BOOL status = FALSE;
+
 	rdpContext* context = rdp->context;
 	rdpUpdate* update = rdp->context->update;
 
@@ -1358,22 +1419,28 @@ BOOL rdp_recv_save_session_info(rdpRdp* rdp, wStream* s)
 	switch (infoType)
 	{
 		case INFO_TYPE_LOGON:
+		{
+			logon_info logonInfo = WINPR_C_ARRAY_INIT;
 			status = rdp_recv_logon_info_v1(rdp, s, &logonInfo);
 
 			if (status && update->SaveSessionInfo)
 				status = update->SaveSessionInfo(context, infoType, &logonInfo);
 
 			rdp_free_logon_info(&logonInfo);
-			break;
+		}
+		break;
 
 		case INFO_TYPE_LOGON_LONG:
+		{
+			logon_info logonInfo = WINPR_C_ARRAY_INIT;
 			status = rdp_recv_logon_info_v2(rdp, s, &logonInfo);
 
 			if (status && update->SaveSessionInfo)
 				status = update->SaveSessionInfo(context, infoType, &logonInfo);
 
 			rdp_free_logon_info(&logonInfo);
-			break;
+		}
+		break;
 
 		case INFO_TYPE_LOGON_PLAIN_NOTIFY:
 			status = rdp_recv_logon_plain_notify(rdp, s);
@@ -1384,29 +1451,31 @@ BOOL rdp_recv_save_session_info(rdpRdp* rdp, wStream* s)
 			break;
 
 		case INFO_TYPE_LOGON_EXTENDED_INF:
+		{
+			logon_info_ex logonInfoEx = WINPR_C_ARRAY_INIT;
 			status = rdp_recv_logon_info_extended(rdp, s, &logonInfoEx);
 
 			if (status && update->SaveSessionInfo)
 				status = update->SaveSessionInfo(context, infoType, &logonInfoEx);
-
-			break;
+		}
+		break;
 
 		default:
-			WLog_ERR(TAG, "Unhandled saveSessionInfo type 0x%" PRIx32 "", infoType);
+			WLog_WARN(TAG, "Unhandled saveSessionInfo type 0x%" PRIx32 "", infoType);
 			status = TRUE;
 			break;
 	}
 
 	if (!status)
 	{
-		WLog_DBG(TAG, "SaveSessionInfo error: infoType: %s (%" PRIu32 ")",
-		         infoType < 4 ? INFO_TYPE_LOGON_STRINGS[infoType % 4] : "Unknown", infoType);
+		WLog_WARN(TAG, "SaveSessionInfo error: infoType: %s (%" PRIu32 ")",
+		          freerdp_session_logon_type_str(infoType), infoType);
 	}
 
 	return status;
 }
 
-static BOOL rdp_write_logon_info_v1(wStream* s, logon_info* info)
+static BOOL rdp_write_logon_info_v1(wStream* s, const logon_info* info)
 {
 	const size_t charLen = 52 / sizeof(WCHAR);
 	const size_t userCharLen = 512 / sizeof(WCHAR);
@@ -1459,6 +1528,8 @@ static BOOL rdp_write_logon_info_v2(wStream* s, const logon_info* info)
 {
 	size_t domainLen = 0;
 	size_t usernameLen = 0;
+	size_t domainStrLen = 0;
+	size_t usernameStrLen = 0;
 
 	if (!Stream_EnsureRemainingCapacity(s, logonInfoV2TotalSize))
 		return FALSE;
@@ -1471,21 +1542,33 @@ static BOOL rdp_write_logon_info_v2(wStream* s, const logon_info* info)
 	Stream_Write_UINT32(s, logonInfoV2Size);
 	Stream_Write_UINT32(s, info->sessionId);
 	if (info->domain)
-		domainLen = strnlen(info->domain, 256); /* lmcons.h UNLEN */
+	{
+		domainStrLen = strnlen(info->domain, 256); /* lmcons.h UNLEN */
+		const SSIZE_T wlen = ConvertUtf8NToWChar(info->domain, domainStrLen, nullptr, 0);
+		if (wlen < 0)
+			return FALSE;
+		domainLen = WINPR_ASSERTING_INT_CAST(size_t, wlen);
+	}
 	if (domainLen >= UINT32_MAX / sizeof(WCHAR))
 		return FALSE;
 	Stream_Write_UINT32(s, (UINT32)(domainLen + 1) * sizeof(WCHAR));
 
 	if (info->username)
-		usernameLen = strnlen(info->username, 256); /* lmcons.h UNLEN */
+	{
+		usernameStrLen = strnlen(info->username, 256); /* lmcons.h UNLEN */
+		const SSIZE_T wlen = ConvertUtf8NToWChar(info->username, usernameStrLen, nullptr, 0);
+		if (wlen < 0)
+			return FALSE;
+		usernameLen = WINPR_ASSERTING_INT_CAST(size_t, wlen);
+	}
 	if (usernameLen >= UINT32_MAX / sizeof(WCHAR))
 		return FALSE;
 	Stream_Write_UINT32(s, (UINT32)(usernameLen + 1) * sizeof(WCHAR));
 	Stream_Seek(s, logonInfoV2ReservedSize);
-	if (Stream_Write_UTF16_String_From_UTF8(s, domainLen + 1, info->domain, domainLen, TRUE) < 0)
+	if (Stream_Write_UTF16_String_From_UTF8(s, domainLen + 1, info->domain, domainStrLen, TRUE) < 0)
 		return FALSE;
-	if (Stream_Write_UTF16_String_From_UTF8(s, usernameLen + 1, info->username, usernameLen, TRUE) <
-	    0)
+	if (Stream_Write_UTF16_String_From_UTF8(s, usernameLen + 1, info->username, usernameStrLen,
+	                                        TRUE) < 0)
 		return FALSE;
 	return TRUE;
 }
@@ -1495,11 +1578,11 @@ static BOOL rdp_write_logon_info_plain(wStream* s)
 	if (!Stream_EnsureRemainingCapacity(s, 576))
 		return FALSE;
 
-	Stream_Seek(s, 576);
+	Stream_Zero(s, 576);
 	return TRUE;
 }
 
-static BOOL rdp_write_logon_info_ex(wStream* s, logon_info_ex* info)
+static BOOL rdp_write_logon_info_ex(wStream* s, const logon_info_ex* info)
 {
 	UINT32 FieldsPresent = 0;
 	UINT16 Size = 2 + 4 + 570;
@@ -1542,7 +1625,7 @@ static BOOL rdp_write_logon_info_ex(wStream* s, logon_info_ex* info)
 	return TRUE;
 }
 
-BOOL rdp_send_save_session_info(rdpContext* context, UINT32 type, void* data)
+BOOL rdp_send_save_session_info(rdpContext* context, UINT32 type, const void* data)
 {
 	UINT16 sec_flags = 0;
 	BOOL status = 0;
@@ -1559,11 +1642,11 @@ BOOL rdp_send_save_session_info(rdpContext* context, UINT32 type, void* data)
 	switch (type)
 	{
 		case INFO_TYPE_LOGON:
-			status = rdp_write_logon_info_v1(s, (logon_info*)data);
+			status = rdp_write_logon_info_v1(s, (const logon_info*)data);
 			break;
 
 		case INFO_TYPE_LOGON_LONG:
-			status = rdp_write_logon_info_v2(s, (logon_info*)data);
+			status = rdp_write_logon_info_v2(s, (const logon_info*)data);
 			break;
 
 		case INFO_TYPE_LOGON_PLAIN_NOTIFY:
@@ -1571,7 +1654,7 @@ BOOL rdp_send_save_session_info(rdpContext* context, UINT32 type, void* data)
 			break;
 
 		case INFO_TYPE_LOGON_EXTENDED_INF:
-			status = rdp_write_logon_info_ex(s, (logon_info_ex*)data);
+			status = rdp_write_logon_info_ex(s, (const logon_info_ex*)data);
 			break;
 
 		default:

@@ -146,7 +146,8 @@ static const struct xf_exit_code_map_t xf_exit_code_map[] = {
 	{ FREERDP_ERROR_CONNECT_ACCOUNT_EXPIRED, XF_EXIT_CONNECT_ACCOUNT_EXPIRED },
 	{ FREERDP_ERROR_CONNECT_LOGON_TYPE_NOT_GRANTED, XF_EXIT_CONNECT_LOGON_TYPE_NOT_GRANTED },
 	{ FREERDP_ERROR_CONNECT_NO_OR_MISSING_CREDENTIALS, XF_EXIT_CONNECT_NO_OR_MISSING_CREDENTIALS },
-	{ FREERDP_ERROR_CONNECT_TARGET_BOOTING, XF_EXIT_CONNECT_TARGET_BOOTING }
+	{ FREERDP_ERROR_CONNECT_TARGET_BOOTING, XF_EXIT_CONNECT_TARGET_BOOTING },
+	{ FREERDP_ERROR_CONNECT_HYBRID_REQUIRED_BY_SERVER, XF_EXIT_CONNECT_HYBRID_REQUIRED_BY_SERVER }
 };
 
 static BOOL xf_setup_x11(xfContext* xfc);
@@ -416,7 +417,7 @@ static BOOL xf_paint(xfContext* xfc, const GDI_RGN* region)
 			                            WINPR_ASSERTING_INT_CAST(UINT16, region->x + region->w),
 			                        .bottom =
 			                            WINPR_ASSERTING_INT_CAST(UINT16, region->y + region->h) };
-		xf_rail_paint(xfc, &rect);
+		return xf_rail_paint(xfc, &rect);
 	}
 	else
 	{
@@ -1313,6 +1314,7 @@ static BOOL xf_process_pipe(rdpContext* context, const char* pipe)
 	while (!freerdp_shall_disconnect_context(context))
 	{
 		char buffer[64] = WINPR_C_ARRAY_INIT;
+		errno = 0;
 		ssize_t rd = read(fd, buffer, sizeof(buffer) - 1);
 		if (rd == 0)
 		{
@@ -1553,7 +1555,8 @@ static int xf_logon_error_info(freerdp* instance, UINT32 data, UINT32 type)
 	WLog_INFO(TAG, "Logon Error Info %s [%s]", str_data, str_type);
 	if (type != LOGON_MSG_SESSION_CONTINUE)
 	{
-		xf_rail_disable_remoteapp_mode(xfc);
+		if (!xf_rail_disable_remoteapp_mode(xfc))
+			return -1;
 	}
 	return 1;
 }

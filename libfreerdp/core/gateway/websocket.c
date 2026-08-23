@@ -23,6 +23,8 @@
 
 #define TAG FREERDP_TAG("core.gateway.websocket")
 
+#define RESPONSE_SIZE_LIMIT (64ULL * 1024ULL * 1024ULL)
+
 struct s_websocket_context
 {
 	size_t payloadLength;
@@ -35,6 +37,13 @@ struct s_websocket_context
 	WEBSOCKET_STATE state;
 	wStream* responseStreamBuffer;
 };
+
+WINPR_ATTR_NODISCARD
+static BOOL Stream_Reset(wStream* s)
+{
+	Stream_ResetPosition(s);
+	return Stream_SetLength(s, Stream_Capacity(s));
+}
 
 static int websocket_write_all(BIO* bio, const BYTE* data, size_t length);
 
@@ -187,6 +196,8 @@ int websocket_context_write(websocket_context* context, BIO* bio, const BYTE* bu
 
 	wStream sbuffer = WINPR_C_ARRAY_INIT;
 	wStream* s = Stream_StaticConstInit(&sbuffer, buf, (size_t)isize);
+	if (!Stream_SetLength(s, Stream_Capacity(s)))
+		return -3;
 	if (!websocket_context_write_wstream(context, bio, s, opcode))
 		return -2;
 	return isize;
@@ -308,7 +319,8 @@ static int websocket_handle_payload(BIO* bio, BYTE* pBuffer, size_t size,
 			if (encodingContext->payloadLength == 0)
 			{
 				websocket_reply_pong(bio, encodingContext, encodingContext->responseStreamBuffer);
-				Stream_ResetPosition(encodingContext->responseStreamBuffer);
+				if (!Stream_Reset(encodingContext->responseStreamBuffer))
+					return -1;
 			}
 		}
 		break;
@@ -318,7 +330,8 @@ static int websocket_handle_payload(BIO* bio, BYTE* pBuffer, size_t size,
 			if (status < 0)
 				return status;
 			/* We don´t care about pong response data, discard. */
-			Stream_ResetPosition(encodingContext->responseStreamBuffer);
+			if (!Stream_Reset(encodingContext->responseStreamBuffer))
+				return -1;
 		}
 		break;
 		case WebsocketCloseOpcode:
@@ -331,7 +344,8 @@ static int websocket_handle_payload(BIO* bio, BYTE* pBuffer, size_t size,
 			{
 				websocket_reply_close(bio, encodingContext, encodingContext->responseStreamBuffer);
 				encodingContext->closeSent = TRUE;
-				Stream_ResetPosition(encodingContext->responseStreamBuffer);
+				if (!Stream_Reset(encodingContext->responseStreamBuffer))
+					return -1;
 			}
 		}
 		break;
@@ -341,7 +355,8 @@ static int websocket_handle_payload(BIO* bio, BYTE* pBuffer, size_t size,
 			status = websocket_read_wstream(bio, encodingContext);
 			if (status < 0)
 				return status;
-			Stream_ResetPosition(encodingContext->responseStreamBuffer);
+			if (!Stream_Reset(encodingContext->responseStreamBuffer))
+				return -1;
 			break;
 	}
 	/* return how many bytes have been written to pBuffer.
@@ -426,6 +441,12 @@ int websocket_context_read(websocket_context* encodingContext, BIO* bio, BYTE* p
 					encodingContext->lengthAndMaskPosition +=
 					    WINPR_ASSERTING_INT_CAST(BYTE, status);
 				}
+				if (encodingContext->payloadLength > RESPONSE_SIZE_LIMIT)
+				{
+					WLog_ERR(TAG, "received excessive payload size %" PRIuz ", aborting",
+					         encodingContext->payloadLength);
+					return -1;
+				}
 				encodingContext->state =
 				    (encodingContext->masking ? WebSocketStateMaskingKey : WebSocketStatePayload);
 			}
@@ -491,5 +512,5 @@ BOOL websocket_context_reset(websocket_context* context)
 	WINPR_ASSERT(context);
 
 	context->state = WebsocketStateOpcodeAndFin;
-	return Stream_SetPosition(context->responseStreamBuffer, 0);
+	return Stream_Reset(context->responseStreamBuffer);
 }

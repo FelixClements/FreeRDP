@@ -16,7 +16,7 @@
     android:fitsSystemWindows="true">
 
     <!-- children are specified bottom-up so that we have a correct z-order in our final layout -->
-    <android.inputmethodservice.KeyboardView
+    <com.freerdp.freerdpcore.presentation.ExtendedKeyboardView
         android:id="@+id/extended_keyboard"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -54,16 +54,7 @@
         android:id="@+id/touchPointerView"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:src="@drawable/touch_pointer_default"
         android:visibility="invisible" />
-
-    <android.inputmethodservice.KeyboardView
-        android:id="@+id/extended_keyboard_header"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_alignParentTop="true"
-        android:layout_centerHorizontal="true"
-        android:visibility="gone" />
 
     <include
         layout="@layout/floating_toolbar"

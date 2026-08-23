@@ -57,6 +57,7 @@ struct rdp_nego
 	BOOL sendNegoData;
 	UINT32 SelectedProtocol;
 	UINT32 RequestedProtocols;
+	UINT32 failureCode; /* last RDP_NEG_FAILURE::failureCode received, 0 if none */
 	BOOL NegotiateSecurityLayer;
 	BOOL EnabledProtocols[32];
 	BOOL RestrictedAdminModeRequired;  /* Client-side */
@@ -94,6 +95,31 @@ static void nego_send(rdpNego* nego);
 static BOOL nego_process_negotiation_request(rdpNego* nego, wStream* s);
 static BOOL nego_process_negotiation_response(rdpNego* nego, wStream* s);
 static BOOL nego_process_negotiation_failure(rdpNego* nego, wStream* s);
+static const char* nego_rdp_neg_fail_str(uint32_t what);
+
+/* Map a RDP_NEG_FAILURE::failureCode to a connection error.
+ *
+ * Only meaningful once the negotiation has terminally failed: a failure code on its own
+ * is usually recoverable by falling back to another security protocol.
+ */
+static UINT32 nego_failure_to_error(uint32_t failureCode)
+{
+	switch (failureCode)
+	{
+		case SSL_CERT_NOT_ON_SERVER:
+			/* The server has no certificate, so neither TLS nor NLA can be used. */
+			return FREERDP_ERROR_TLS_CONNECT_FAILED;
+
+		case HYBRID_REQUIRED_BY_SERVER:
+			/* The server insists on NLA, but it is not enabled in the client settings.
+			 * Reaching this point means the fallback found no other usable protocol. */
+			return FREERDP_ERROR_CONNECT_HYBRID_REQUIRED_BY_SERVER;
+
+		default:
+			/* The server rejected every security protocol we were permitted to offer. */
+			return FREERDP_ERROR_SECURITY_NEGO_CONNECT_FAILED;
+	}
+}
 
 BOOL nego_update_settings_from_state(rdpNego* nego, rdpSettings* settings)
 {
@@ -236,9 +262,19 @@ BOOL nego_connect(rdpNego* nego)
 
 			if (nego_get_state(nego) == NEGO_STATE_FAIL)
 			{
-				if (freerdp_get_last_error(transport_get_context(nego->transport)) ==
-				    FREERDP_ERROR_SUCCESS)
-					WLog_Print(nego->log, WLOG_ERROR, "Protocol Security Negotiation Failure");
+				if (freerdp_get_last_error(context) == FREERDP_ERROR_SUCCESS)
+				{
+					if (nego->failureCode != 0)
+						WLog_Print(nego->log, WLOG_ERROR,
+						           "Protocol Security Negotiation Failure: %s [0x%08" PRIx32 "]",
+						           nego_rdp_neg_fail_str(nego->failureCode), nego->failureCode);
+					else
+						WLog_Print(nego->log, WLOG_ERROR, "Protocol Security Negotiation Failure");
+				}
+
+				if (nego->failureCode != 0)
+					freerdp_set_last_error_if_not(context,
+					                              nego_failure_to_error(nego->failureCode));
 
 				nego_set_state(nego, NEGO_STATE_FINAL);
 				return FALSE;
@@ -1074,13 +1110,7 @@ void nego_send(rdpNego* nego)
 BOOL nego_send_negotiation_request(rdpNego* nego)
 {
 	BOOL rc = FALSE;
-	wStream* s = nullptr;
-	size_t length = 0;
-	size_t bm = 0;
-	size_t em = 0;
-	BYTE flags = 0;
-	size_t cookie_length = 0;
-	s = Stream_New(nullptr, 512);
+	wStream* s = Stream_New(nullptr, 512);
 
 	WINPR_ASSERT(nego);
 	if (!s)
@@ -1089,12 +1119,14 @@ BOOL nego_send_negotiation_request(rdpNego* nego)
 		return FALSE;
 	}
 
-	length = TPDU_CONNECTION_REQUEST_LENGTH;
-	bm = Stream_GetPosition(s);
-	Stream_Seek(s, length);
+	const size_t bm = Stream_GetPosition(s);
+	if (!Stream_SafeSeek(s, TPDU_CONNECTION_REQUEST_LENGTH))
+		return FALSE;
 
 	if (nego->RoutingToken)
 	{
+		if (!Stream_EnsureRemainingCapacity(s, nego->RoutingTokenLength))
+			return FALSE;
 		Stream_Write(s, nego->RoutingToken, nego->RoutingTokenLength);
 
 		/* Ensure Routing Token is correctly terminated - may already be present in string */
@@ -1105,28 +1137,33 @@ BOOL nego_send_negotiation_request(rdpNego* nego)
 		{
 			WLog_Print(nego->log, WLOG_DEBUG,
 			           "Routing token looks correctly terminated - use verbatim");
-			length += nego->RoutingTokenLength;
 		}
 		else
 		{
 			WLog_Print(nego->log, WLOG_DEBUG, "Adding terminating CRLF to routing token");
+			if (!Stream_EnsureRemainingCapacity(s, 2))
+				return FALSE;
 			Stream_Write_UINT8(s, 0x0D); /* CR */
 			Stream_Write_UINT8(s, 0x0A); /* LF */
-			length += nego->RoutingTokenLength + 2;
 		}
 	}
 	else if (nego->cookie)
 	{
-		cookie_length = strlen(nego->cookie);
+		size_t cookie_length = strlen(nego->cookie);
 
 		if (cookie_length > nego->CookieMaxLength)
 			cookie_length = nego->CookieMaxLength;
 
+		if (!Stream_EnsureRemainingCapacity(s, 17))
+			return FALSE;
 		Stream_Write(s, "Cookie: mstshash=", 17);
+		if (!Stream_EnsureRemainingCapacity(s, cookie_length))
+			return FALSE;
 		Stream_Write(s, (BYTE*)nego->cookie, cookie_length);
+		if (!Stream_EnsureRemainingCapacity(s, 2))
+			return FALSE;
 		Stream_Write_UINT8(s, 0x0D); /* CR */
 		Stream_Write_UINT8(s, 0x0A); /* LF */
-		length += cookie_length + 19;
 	}
 
 	{
@@ -1137,6 +1174,8 @@ BOOL nego_send_negotiation_request(rdpNego* nego)
 
 	if ((nego->RequestedProtocols > PROTOCOL_RDP) || (nego->sendNegoData))
 	{
+		UINT8 flags = 0;
+
 		/* RDP_NEG_DATA must be present for TLS and NLA */
 		if (nego->RestrictedAdminModeRequired)
 			flags |= RESTRICTED_ADMIN_MODE_REQUIRED;
@@ -1144,22 +1183,23 @@ BOOL nego_send_negotiation_request(rdpNego* nego)
 		if (nego->RemoteCredsGuardRequired)
 			flags |= REDIRECTED_AUTHENTICATION_MODE_REQUIRED;
 
+		if (!Stream_EnsureRemainingCapacity(s, 8))
+			return FALSE;
+
 		Stream_Write_UINT8(s, TYPE_RDP_NEG_REQ);
 		Stream_Write_UINT8(s, flags);
 		Stream_Write_UINT16(s, 8);                        /* RDP_NEG_DATA length (8) */
 		Stream_Write_UINT32(s, nego->RequestedProtocols); /* requestedProtocols */
-		length += 8;
 	}
 
-	if (length > UINT16_MAX)
+	const size_t em = Stream_GetPosition(s);
+	if ((em < 5) || (em > UINT16_MAX))
 		goto fail;
-
-	em = Stream_GetPosition(s);
 	if (!Stream_SetPosition(s, bm))
 		goto fail;
-	if (!tpkt_write_header(s, (UINT16)length))
+	if (!tpkt_write_header(s, (UINT16)em))
 		goto fail;
-	if (!tpdu_write_connection_request(s, (UINT16)length - 5))
+	if (!tpdu_write_connection_request(s, (UINT16)em - 5))
 		goto fail;
 	if (!Stream_SetPosition(s, em))
 		goto fail;
@@ -1451,6 +1491,11 @@ BOOL nego_process_negotiation_failure(rdpNego* nego, wStream* s)
 	const uint32_t failureCode = Stream_Get_UINT32(s);
 	const char* failureStr = nego_rdp_neg_fail_str(failureCode);
 	DWORD level = WLOG_WARN;
+
+	/* Remember why the server refused. The cases below fall back to another protocol, so
+	 * this is only turned into an error once the negotiation has terminally failed. */
+	nego->failureCode = failureCode;
+
 	switch (failureCode)
 	{
 		case SSL_REQUIRED_BY_SERVER:
@@ -1691,6 +1736,7 @@ void nego_init(rdpNego* nego)
 	nego->CookieMaxLength = DEFAULT_COOKIE_MAX_LENGTH;
 	nego->sendNegoData = FALSE;
 	nego->flags = 0;
+	nego->failureCode = 0;
 }
 
 /**

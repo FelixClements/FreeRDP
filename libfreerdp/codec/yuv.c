@@ -11,7 +11,9 @@
 
 #define TAG FREERDP_TAG("codec")
 
-#define TILE_SIZE 64
+#if !defined(YUV_TILE_SIZE)
+#error "YUV_TILE_SIZE must be defined to the size of a single YUV decoder block"
+#endif
 
 typedef struct
 {
@@ -168,8 +170,8 @@ BOOL yuv_context_reset(YUV_CONTEXT* WINPR_RESTRICT context, UINT32 width, UINT32
 		 *
 		 * ~2MB total for a 4k resolution, so negligible.
 		 */
-		const size_t pw = (width + TILE_SIZE - width % TILE_SIZE) / 16;
-		const size_t ph = (height + TILE_SIZE - height % TILE_SIZE) / 16;
+		const size_t pw = (width + YUV_TILE_SIZE - width % YUV_TILE_SIZE) / 16;
+		const size_t ph = (height + YUV_TILE_SIZE - height % YUV_TILE_SIZE) / 16;
 
 		const size_t count = pw * ph;
 
@@ -405,7 +407,7 @@ static BOOL pool_decode(YUV_CONTEXT* WINPR_RESTRICT context, PTP_WORK_CALLBACK c
 		while (r.left < r.right)
 		{
 			RECTANGLE_16 y = r;
-			y.right = MIN(r.right, r.left + TILE_SIZE);
+			y.right = MIN(r.right, r.left + YUV_TILE_SIZE);
 
 			while (y.top < y.bottom)
 			{
@@ -418,17 +420,17 @@ static BOOL pool_decode(YUV_CONTEXT* WINPR_RESTRICT context, PTP_WORK_CALLBACK c
 				}
 
 				YUV_PROCESS_WORK_PARAM* cur = &context->work_dec_params[waitCount];
-				z.bottom = MIN(z.bottom, z.top + TILE_SIZE);
+				z.bottom = MIN(z.bottom, z.top + YUV_TILE_SIZE);
 				if (rectangle_is_empty(&z))
 					continue;
 				*cur = pool_decode_param(&z, context, pYUVData, iStride, DstFormat, dest, nDstStep);
 				if (!submit_object(&context->work_objects[waitCount], cb, cur, context))
 					goto fail;
 				waitCount++;
-				y.top += TILE_SIZE;
+				y.top += YUV_TILE_SIZE;
 			}
 
-			r.left += TILE_SIZE;
+			r.left += YUV_TILE_SIZE;
 		}
 	}
 	rc = TRUE;
@@ -474,7 +476,12 @@ static void CALLBACK yuv444_combine_work_callback(PTP_CALLBACK_INSTANCE instance
 	const RECTANGLE_16* rect = &param->rect;
 	WINPR_ASSERT(rect);
 
-	const UINT32 alignedWidth = yuv->width + ((yuv->width % 32 != 0) ? 32 - yuv->width % 32 : 0);
+	/* For AVC444v2 the combine reads the V (and second half U) samples from the
+	 * decoded auxiliary plane at a fixed nTotalWidth offset. A server may send a
+	 * frame smaller than the surface, so cap the aligned width at the Y plane
+	 * stride to keep that offset inside the decoded plane. */
+	const UINT32 alignedWidth =
+	    MIN(yuv->width + ((yuv->width % 32 != 0) ? 32 - yuv->width % 32 : 0), param->iStride[0]);
 	const UINT32 alignedHeight =
 	    yuv->height + ((yuv->height % 16 != 0) ? 16 - yuv->height % 16 : 0);
 
@@ -551,7 +558,7 @@ static BOOL pool_decode_rect(YUV_CONTEXT* WINPR_RESTRICT context, BYTE type,
 	}
 
 	/* case where we use threads */
-	for (waitCount = 0; waitCount < numRegionRects; waitCount++)
+	for (UINT32 x = 0; x < numRegionRects; x++)
 	{
 		YUV_COMBINE_WORK_PARAM* current = nullptr;
 
@@ -561,11 +568,12 @@ static BOOL pool_decode_rect(YUV_CONTEXT* WINPR_RESTRICT context, BYTE type,
 			waitCount = 0;
 		}
 		current = &context->work_combined_params[waitCount];
-		*current = pool_decode_rect_param(&regionRects[waitCount], context, type, pYUVData, iStride,
+		*current = pool_decode_rect_param(&regionRects[x], context, type, pYUVData, iStride,
 		                                  pYUVDstData, iDstStride);
 
 		if (!submit_object(&context->work_objects[waitCount], cb, current, context))
 			goto fail;
+		waitCount++;
 	}
 
 	rc = TRUE;
@@ -803,15 +811,6 @@ static BOOL pool_encode(YUV_CONTEXT* WINPR_RESTRICT context, PTP_WORK_CALLBACK c
 	}
 
 	/* case where we use threads */
-	for (UINT32 x = 0; x < numRegionRects; x++)
-	{
-		const RECTANGLE_16* rect = &regionRects[x];
-		const UINT32 height = rect->bottom - rect->top;
-		const UINT32 steps = getSteps(height, context->heightStep);
-
-		waitCount += steps;
-	}
-
 	for (UINT32 x = 0; x < numRegionRects; x++)
 	{
 		const RECTANGLE_16* rect = &regionRects[x];

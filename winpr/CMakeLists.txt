@@ -209,6 +209,7 @@ check_type_size(SSIZE_T WIN_SSIZE_T)
 set(WINPR_HAVE_SSIZE_T ${HAVE_SSIZE_T})
 set(WINPR_HAVE_WIN_SSIZE_T ${HAVE_WIN_SSIZE_T})
 
+check_symbol_exists(strnstr string.h WINPR_HAVE_STRNSTR)
 check_symbol_exists(strndup string.h WINPR_HAVE_STRNDUP)
 check_include_files(unistd.h WINPR_HAVE_UNISTD_H)
 check_include_files(execinfo.h WINPR_HAVE_EXECINFO_HEADER)
@@ -244,17 +245,24 @@ endif()
 if(NOT IOS)
   check_include_files(fcntl.h WINPR_HAVE_FCNTL_H)
   check_include_files(aio.h WINPR_HAVE_AIO_H)
-  check_include_files(sys/timerfd.h WINPR_HAVE_SYS_TIMERFD_H)
   check_include_files(unistd.h WINPR_HAVE_UNISTD_H)
   check_include_files(inttypes.h WINPR_HAVE_INTTYPES_H)
   check_include_files(sys/filio.h WINPR_HAVE_SYS_FILIO_H)
   check_include_files(sys/sockio.h WINPR_HAVE_SYS_SOCKIO_H)
   check_include_files(syslog.h WINPR_HAVE_SYSLOG_H)
   check_include_files(sys/select.h WINPR_HAVE_SYS_SELECT_H)
-  check_include_files(sys/eventfd.h WINPR_HAVE_SYS_EVENTFD_H)
+  check_include_files(linux/msdos_fs.h WINPR_HAVE_LINUX_MSDOS_FS_H)
   check_include_files(unwind.h WINPR_HAVE_UNWIND_H)
+  if(EPOLLSHIM)
+    list(APPEND CMAKE_REQUIRED_LIBRARIES PkgConfig::EPOLLSHIM)
+  endif()
+  check_include_files(sys/timerfd.h WINPR_HAVE_SYS_TIMERFD_H)
+  check_include_files(sys/eventfd.h WINPR_HAVE_SYS_EVENTFD_H)
   if(WINPR_HAVE_SYS_EVENTFD_H)
     check_symbol_exists(eventfd_read sys/eventfd.h WITH_EVENTFD_READ_WRITE)
+  endif()
+  if(EPOLLSHIM)
+    list(REMOVE_ITEM CMAKE_REQUIRED_LIBRARIES PkgConfig::EPOLLSHIM)
   endif()
 
   include(CheckFunctionExists)
@@ -262,6 +270,22 @@ if(NOT IOS)
   check_function_exists(getlogin_r WINPR_HAVE_GETLOGIN_R)
   check_function_exists(getpwuid_r WINPR_HAVE_GETPWUID_R)
   check_struct_has_member("struct tm" tm_gmtoff time.h WINPR_HAVE_TM_GMTOFF)
+
+  if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.19")
+    include(CheckSourceCompiles)
+    check_source_compiles(
+      C
+      [[
+  #include <sys/xattr.h>
+  int main(void) {
+    int intAttr = 42;
+    const int rc = setxattr("/tmp/foobar", "somename", &intAttr, sizeof(intAttr), 0);
+    return 0;
+  }
+  ]]
+      WINPR_HAVE_SYS_XATTR_H
+    )
+  endif()
 else()
   set(WINPR_HAVE_FCNTL_H 1)
   set(WINPR_HAVE_UNISTD_H 1)
@@ -271,12 +295,6 @@ else()
 endif()
 
 if(UNIX OR CYGWIN)
-  if(FREEBSD)
-    list(APPEND CMAKE_REQUIRED_INCLUDES ${EPOLLSHIM_INCLUDE_DIR})
-  endif()
-  if(FREEBSD)
-    list(REMOVE_ITEM CMAKE_REQUIRED_INCLUDES ${EPOLLSHIM_INCLUDE_DIR})
-  endif()
   option(WITH_POLL "Check for and include poll.h" ON)
   if(WITH_POLL)
     check_include_files(poll.h WINPR_HAVE_POLL_H)

@@ -54,11 +54,10 @@
 static INIT_ONCE stats_names_once = INIT_ONCE_STATIC_INIT;
 static char stats_names[RDP_STATS_COUNT][bufferlen];
 
-static BOOL stats_names_generate(WINPR_ATTR_UNUSED PINIT_ONCE InitOnce,
-                                 WINPR_ATTR_UNUSED PVOID Parameter,
-                                 WINPR_ATTR_UNUSED PVOID* Context)
+static BOOL CALLBACK stats_names_generate(WINPR_ATTR_UNUSED PINIT_ONCE InitOnce,
+                                          WINPR_ATTR_UNUSED PVOID Parameter,
+                                          WINPR_ATTR_UNUSED PVOID* Context)
 {
-
 	for (size_t index = 0; index < RDP_STATS_COUNT; index++)
 	{
 		char* buffer = stats_names[index];
@@ -68,10 +67,12 @@ static BOOL stats_names_generate(WINPR_ATTR_UNUSED PINIT_ONCE InitOnce,
 		size_t offset = 0;
 		if (index < limit)
 		{
-			const char* str =
-			    primary_order_string(WINPR_ASSERTING_INT_CAST(UINT32, index), buffer, bufferlen);
+			char obuffer[64] = WINPR_C_ARRAY_INIT;
+			const char* str = primary_order_string(WINPR_ASSERTING_INT_CAST(UINT32, index), obuffer,
+			                                       sizeof(obuffer));
 			if (!str)
 				return FALSE;
+			(void)_snprintf(buffer, bufferlen, "RDP_STATS_ORDER_PRIMARY %s", str);
 			WINPR_ASSERT(strnlen(buffer, 2) > 0);
 			continue;
 		}
@@ -80,10 +81,12 @@ static BOOL stats_names_generate(WINPR_ATTR_UNUSED PINIT_ONCE InitOnce,
 		limit += ARRAYSIZE(stats.secondary);
 		if (index < limit)
 		{
+			char obuffer[64] = WINPR_C_ARRAY_INIT;
 			const char* str = secondary_order_string(
-			    WINPR_ASSERTING_INT_CAST(UINT32, index - offset), buffer, bufferlen);
+			    WINPR_ASSERTING_INT_CAST(UINT32, index - offset), obuffer, sizeof(obuffer));
 			if (!str)
 				return FALSE;
+			(void)_snprintf(buffer, bufferlen, "RDP_STATS_ORDER_SECONDARY %s", str);
 			WINPR_ASSERT(strnlen(buffer, 2) > 0);
 			continue;
 		}
@@ -92,10 +95,12 @@ static BOOL stats_names_generate(WINPR_ATTR_UNUSED PINIT_ONCE InitOnce,
 		limit += ARRAYSIZE(stats.altsec);
 		if (index < limit)
 		{
+			char obuffer[64] = WINPR_C_ARRAY_INIT;
 			const char* str = altsec_order_string(WINPR_ASSERTING_INT_CAST(BYTE, index - offset),
-			                                      buffer, bufferlen);
+			                                      obuffer, sizeof(obuffer));
 			if (!str)
 				return FALSE;
+			(void)_snprintf(buffer, bufferlen, "RDP_STATS_ORDER_ALTSEC %s", str);
 			WINPR_ASSERT(strnlen(buffer, 2) > 0);
 			continue;
 		}
@@ -2735,8 +2740,8 @@ static BOOL update_write_order_field_flags(UINT32 fieldFlags, const WINDOW_STATE
 
 	if ((fieldFlags & WINDOW_ORDER_FIELD_TITLE) != 0)
 	{
-		Stream_Write_UINT16(s, stateOrder->titleInfo.length);
-		Stream_Write(s, stateOrder->titleInfo.string, stateOrder->titleInfo.length);
+		if (rail_write_unicode_string(s, &stateOrder->titleInfo) != CHANNEL_RC_OK)
+			return FALSE;
 	}
 
 	if ((fieldFlags & WINDOW_ORDER_FIELD_CLIENT_AREA_OFFSET) != 0)
@@ -2812,9 +2817,8 @@ static BOOL update_write_order_field_flags(UINT32 fieldFlags, const WINDOW_STATE
 
 	if ((fieldFlags & WINDOW_ORDER_FIELD_OVERLAY_DESCRIPTION) != 0)
 	{
-		Stream_Write_UINT16(s, stateOrder->OverlayDescription.length);
-		Stream_Write(s, stateOrder->OverlayDescription.string,
-		             stateOrder->OverlayDescription.length);
+		if (rail_write_unicode_string(s, &stateOrder->OverlayDescription) != CHANNEL_RC_OK)
+			return FALSE;
 	}
 
 	if ((fieldFlags & WINDOW_ORDER_FIELD_TASKBAR_BUTTON) != 0)
@@ -3171,8 +3175,8 @@ update_send_new_or_existing_notification_icons(rdpContext* context,
 
 	if ((orderInfo->fieldFlags & WINDOW_ORDER_FIELD_NOTIFY_TIP) != 0)
 	{
-		Stream_Write_UINT16(s, iconStateOrder->toolTip.length);
-		Stream_Write(s, iconStateOrder->toolTip.string, iconStateOrder->toolTip.length);
+		if (rail_write_unicode_string(s, &iconStateOrder->toolTip) != CHANNEL_RC_OK)
+			return FALSE;
 	}
 
 	if ((orderInfo->fieldFlags & WINDOW_ORDER_FIELD_NOTIFY_INFO_TIP) != 0)
@@ -3185,10 +3189,10 @@ update_send_new_or_existing_notification_icons(rdpContext* context,
 
 		Stream_Write_UINT32(s, infoTip.timeout);     /* Timeout (4 bytes) */
 		Stream_Write_UINT32(s, infoTip.flags);       /* InfoFlags (4 bytes) */
-		Stream_Write_UINT16(s, infoTip.text.length); /* InfoTipText (variable) */
-		Stream_Write(s, infoTip.text.string, infoTip.text.length);
-		Stream_Write_UINT16(s, infoTip.title.length); /* Title (variable) */
-		Stream_Write(s, infoTip.title.string, infoTip.title.length);
+		if (rail_write_unicode_string(s, &infoTip.text) != CHANNEL_RC_OK)
+			return FALSE;
+		if (rail_write_unicode_string(s, &infoTip.title) != CHANNEL_RC_OK)
+			return FALSE;
 	}
 
 	if ((orderInfo->fieldFlags & WINDOW_ORDER_FIELD_NOTIFY_STATE) != 0)
@@ -3430,8 +3434,8 @@ void update_free_window_state(WINDOW_STATE_ORDER* window_state)
 	if (!window_state)
 		return;
 
-	free(window_state->OverlayDescription.string);
-	free(window_state->titleInfo.string);
+	rail_unicode_string_free(&window_state->OverlayDescription);
+	rail_unicode_string_free(&window_state->titleInfo);
 	free(window_state->windowRects);
 	free(window_state->visibilityRects);
 	memset(window_state, 0, sizeof(WINDOW_STATE_ORDER));
@@ -3679,6 +3683,9 @@ void update_dump_stats(rdpUpdate* update)
 	{
 		const char* name = rdp_stats_name_for_index(x);
 		const uint64_t val = rdp_stats_value_for_index(update, x);
+		if (val == 0)
+			continue;
+
 		WINPR_ASSERT(name && strnlen(name, 2) > 0);
 		const bool unknown = strstr(name, " UNKNOWN") != nullptr;
 		const bool unused = strstr(name, "UNUSED") != nullptr;
